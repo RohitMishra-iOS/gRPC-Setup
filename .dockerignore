@@ -1,0 +1,19 @@
+# Dependencies (reinstalled inside the image)
+node_modules/
+
+# Environment files (secrets must come from Render env vars, not baked in)
+.env
+.env.*
+!.env.example
+
+# Dev / editor noise
+.git/
+.gitignore
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/
+
+# Docs
+README.md

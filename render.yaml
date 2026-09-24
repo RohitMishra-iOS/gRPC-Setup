@@ -1,0 +1,46 @@
+# render.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Render Blueprint — deploys the gRPC + gRPC-Web proxy server as a single
+# Web Service using Docker.
+#
+# Deploy steps:
+#   1. Push the `server/` folder (or whole repo) to GitHub / GitLab.
+#   2. In Render dashboard → New → Blueprint → point to this repo.
+#   3. Render reads this file and creates the service automatically.
+#
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: grpc-status-server
+    runtime: docker
+    # Path to the Dockerfile, relative to the repo root.
+    # If you push only the server/ folder as its own repo, change to: .
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+
+    # Render injects PORT automatically — our server reads it as the
+    # gRPC-Web proxy port (public). No need to set it here.
+
+    # Health check — Render pings this to confirm the container is up.
+    # We use the proxy port; a 405 (Method Not Allowed on GET) is fine —
+    # it means the server is running.
+    healthCheckPath: /
+
+    envVars:
+      # Internal gRPC server port — NOT exposed publicly, only used inside
+      # the container between server.js gRPC and the proxy.
+      - key: GRPC_PORT
+        value: "50051"
+
+      - key: GRPC_HOST
+        value: "0.0.0.0"
+
+      - key: NODE_ENV
+        value: "production"
+
+      # Set this to your frontend domain(s) in production, e.g.:
+      # https://yourapp.onrender.com,https://yourapp.com
+      # Leave as * for open access during development.
+      - key: ALLOWED_ORIGINS
+        value: "*"

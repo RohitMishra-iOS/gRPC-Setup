@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package status;
+
+// A simple service that returns a 200-style success response.
+service StatusService {
+  rpc CheckStatus (StatusRequest) returns (StatusResponse);
+}
+
+message StatusRequest {
+  string message = 1;
+}
+
+message StatusResponse {
+  int32 code = 1;
+  string status = 2;
+  string message = 3;
+}
