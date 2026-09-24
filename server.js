@@ -37,6 +37,50 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS      || '*';
 
 const PROTO_PATH = path.join(__dirname, 'status.proto');
 
+// ── google.protobuf.Struct ⇄ plain JS object conversion ────────────────────────
+// grpc-js/proto-loader have no built-in wrapper for Struct/Value/ListValue
+// (only google.protobuf.Any gets one), so requests/responses arrive and must
+// be sent as the raw { fields: { key: { kind, <kind>_value } } } shape.
+
+function valueToPlain(value) {
+  if (!value) return null;
+  switch (value.kind) {
+    case 'numberValue': return value.numberValue;
+    case 'stringValue': return value.stringValue;
+    case 'boolValue':   return value.boolValue;
+    case 'structValue': return structToPlain(value.structValue);
+    case 'listValue':   return (value.listValue.values || []).map(valueToPlain);
+    default:             return null; // nullValue, or unset
+  }
+}
+
+function structToPlain(struct) {
+  const out = {};
+  const fields = (struct && struct.fields) || {};
+  for (const key of Object.keys(fields)) {
+    out[key] = valueToPlain(fields[key]);
+  }
+  return out;
+}
+
+function plainToValue(v) {
+  if (v === null || v === undefined)  return { nullValue: 0 };
+  if (typeof v === 'number')          return { numberValue: v };
+  if (typeof v === 'string')          return { stringValue: v };
+  if (typeof v === 'boolean')         return { boolValue: v };
+  if (Array.isArray(v))               return { listValue: { values: v.map(plainToValue) } };
+  if (typeof v === 'object')          return { structValue: plainToStruct(v) };
+  return { nullValue: 0 };
+}
+
+function plainToStruct(obj) {
+  const fields = {};
+  for (const key of Object.keys(obj || {})) {
+    fields[key] = plainToValue(obj[key]);
+  }
+  return { fields };
+}
+
 // ── 1. gRPC Server ────────────────────────────────────────────────────────────
 
 function startGrpcServer() {
@@ -46,18 +90,31 @@ function startGrpcServer() {
     enums: String,
     defaults: true,
     oneofs: true,
+    includeDirs: [__dirname],
   });
 
   const statusProto = grpc.loadPackageDefinition(packageDefinition).status;
 
   function checkStatus(call, callback) {
-    const incomingMessage = call.request.message || '';
-    console.log(`[gRPC] CheckStatus ← "${incomingMessage}"`);
+    const body = structToPlain(call.request.message);
+    console.log(`[gRPC] CheckStatus ← ${JSON.stringify(body)}`);
+
+    const errors = validateEventsBatch(body);
+    if (errors.length > 0) {
+      callback(null, {
+        code: 400,
+        status: 'ERROR',
+        message: plainToStruct({ ...body, status_code: 400, error: 'Validation failed', details: errors }),
+      });
+      return;
+    }
+
+    console.log(`[gRPC] ✓ batch_id=${body.batch_id || 'n/a'} events=${body.events.length}`);
 
     callback(null, {
       code: 200,
       status: 'SUCCESS',
-      message: `OK - received: "${incomingMessage}"`,
+      message: plainToStruct({ ...body, status_code: 200 }),
     });
   }
 
@@ -146,6 +203,24 @@ function validateEventsBatch(body) {
   return errors;
 }
 
+// Parses + validates a raw JSON string and echoes the same JSON back,
+// merged with a status_code field (and error/details on failure).
+function processEventsBatch(rawJson) {
+  let body;
+  try {
+    body = JSON.parse(rawJson || '{}');
+  } catch (err) {
+    return { statusCode: 400, payload: { status_code: 400, error: 'Invalid JSON', details: [err.message] } };
+  }
+
+  const errors = validateEventsBatch(body);
+  if (errors.length > 0) {
+    return { statusCode: 400, payload: { ...body, status_code: 400, error: 'Validation failed', details: errors } };
+  }
+
+  return { statusCode: 200, payload: { ...body, status_code: 200 } };
+}
+
 function handleEventsRequest(req, res) {
   const chunks = [];
   req.on('data', (chunk) => chunks.push(chunk));
@@ -155,26 +230,14 @@ function handleEventsRequest(req, res) {
   });
 
   req.on('end', () => {
-    let body;
-    try {
-      body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-    } catch (err) {
-      res.writeHead(400, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid JSON', details: [err.message] }));
-      return;
+    const { statusCode, payload } = processEventsBatch(Buffer.concat(chunks).toString('utf8'));
+
+    if (statusCode === 200) {
+      console.log(`[Events] ✓ batch_id=${payload.batch_id || 'n/a'} events=${payload.events.length}`);
     }
 
-    const errors = validateEventsBatch(body);
-    if (errors.length > 0) {
-      res.writeHead(400, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Validation failed', details: errors }));
-      return;
-    }
-
-    console.log(`[Events] ✓ batch_id=${body.batch_id || 'n/a'} events=${body.events.length}`);
-
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', received: body.events.length }));
+    res.writeHead(statusCode, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(payload));
   });
 }
 
