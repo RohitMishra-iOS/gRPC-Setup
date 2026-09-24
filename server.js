@@ -120,6 +120,64 @@ function setCorsHeaders(req, res) {
     'grpc-status, grpc-message, trailer, te');
 }
 
+// ── Events batch ingest ───────────────────────────────────────────────────────
+// Accepts an analytics-style event batch as JSON:
+//   { events: [{ timestamp_ms, session_id, name, params }, ...], instance_id, ... }
+// Validation: every event must have a numeric timestamp_ms and a non-blank name.
+
+function validateEventsBatch(body) {
+  if (!body || typeof body !== 'object') {
+    return ['Body must be a JSON object'];
+  }
+  if (!Array.isArray(body.events)) {
+    return ['"events" must be an array'];
+  }
+
+  const errors = [];
+  body.events.forEach((event, i) => {
+    if (typeof event.timestamp_ms !== 'number' || !Number.isFinite(event.timestamp_ms)) {
+      errors.push(`events[${i}].timestamp_ms must be a number`);
+    }
+    if (typeof event.name !== 'string' || event.name.trim() === '') {
+      errors.push(`events[${i}].name must not be blank`);
+    }
+  });
+
+  return errors;
+}
+
+function handleEventsRequest(req, res) {
+  const chunks = [];
+  req.on('data', (chunk) => chunks.push(chunk));
+  req.on('error', (err) => {
+    console.error('[Events] request read error:', err.message);
+    if (!res.headersSent) { res.writeHead(500); res.end(); }
+  });
+
+  req.on('end', () => {
+    let body;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    } catch (err) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON', details: [err.message] }));
+      return;
+    }
+
+    const errors = validateEventsBatch(body);
+    if (errors.length > 0) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Validation failed', details: errors }));
+      return;
+    }
+
+    console.log(`[Events] ✓ batch_id=${body.batch_id || 'n/a'} events=${body.events.length}`);
+
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', received: body.events.length }));
+  });
+}
+
 function handleProxyRequest(req, res) {
   setCorsHeaders(req, res);
 
@@ -139,6 +197,12 @@ function handleProxyRequest(req, res) {
   if (req.method !== 'POST') {
     res.writeHead(405);
     res.end('Method Not Allowed');
+    return;
+  }
+
+  // ── Analytics events batch ──────────────────────────────────────────────
+  if (req.url === '/events') {
+    handleEventsRequest(req, res);
     return;
   }
 
