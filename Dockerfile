@@ -19,6 +19,7 @@ COPY --from=deps /app/node_modules ./node_modules
 
 # Copy application source
 COPY server.js         ./server.js
+COPY db.js             ./db.js
 COPY grpc-web-proxy.js ./grpc-web-proxy.js
 COPY status.proto      ./status.proto
 COPY package.json      ./package.json
