@@ -25,6 +25,7 @@ const http        = require('http');
 const http2       = require('http2');
 const grpc        = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
+const db          = require('./db');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -95,7 +96,7 @@ function startGrpcServer() {
 
   const statusProto = grpc.loadPackageDefinition(packageDefinition).status;
 
-  function checkStatus(call, callback) {
+  async function checkStatus(call, callback) {
     const body = structToPlain(call.request.message);
     console.log(`[gRPC] CheckStatus ← ${JSON.stringify(body)}`);
 
@@ -105,6 +106,18 @@ function startGrpcServer() {
         code: 400,
         status: 'ERROR',
         message: plainToStruct({ ...body, status_code: 400, error: 'Validation failed', details: errors }),
+      });
+      return;
+    }
+
+    try {
+      await db.saveKeyValues(body, body.batch_id);
+    } catch (err) {
+      console.error('[gRPC] DB save error:', err.message);
+      callback(null, {
+        code: 500,
+        status: 'ERROR',
+        message: plainToStruct({ ...body, status_code: 500, error: 'Database save failed', details: [err.message] }),
       });
       return;
     }
@@ -205,7 +218,7 @@ function validateEventsBatch(body) {
 
 // Parses + validates a raw JSON string and echoes the same JSON back,
 // merged with a status_code field (and error/details on failure).
-function processEventsBatch(rawJson) {
+async function processEventsBatch(rawJson) {
   let body;
   try {
     body = JSON.parse(rawJson || '{}');
@@ -216,6 +229,12 @@ function processEventsBatch(rawJson) {
   const errors = validateEventsBatch(body);
   if (errors.length > 0) {
     return { statusCode: 400, payload: { ...body, status_code: 400, error: 'Validation failed', details: errors } };
+  }
+
+  try {
+    await db.saveKeyValues(body, body.batch_id);
+  } catch (err) {
+    return { statusCode: 500, payload: { ...body, status_code: 500, error: 'Database save failed', details: [err.message] } };
   }
 
   return { statusCode: 200, payload: { ...body, status_code: 200 } };
@@ -229,8 +248,8 @@ function handleEventsRequest(req, res) {
     if (!res.headersSent) { res.writeHead(500); res.end(); }
   });
 
-  req.on('end', () => {
-    const { statusCode, payload } = processEventsBatch(Buffer.concat(chunks).toString('utf8'));
+  req.on('end', async () => {
+    const { statusCode, payload } = await processEventsBatch(Buffer.concat(chunks).toString('utf8'));
 
     if (statusCode === 200) {
       console.log(`[Events] ✓ batch_id=${payload.batch_id || 'n/a'} events=${payload.events.length}`);
@@ -385,6 +404,7 @@ function startProxy() {
 
 async function main() {
   try {
+    await db.connect();
     await startGrpcServer();
     await startProxy();
 
