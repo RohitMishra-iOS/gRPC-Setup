@@ -3,8 +3,9 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * MongoDB persistence for incoming event-batch JSON payloads.
  *
- * Each top-level key of the incoming JSON object is stored as its own
- * document: { key, value, batch_id, received_at }.
+ * Each incoming JSON object (app, device, screen_name, events, batch_id,
+ * instance_id, user_properties, ...) is stored as a single document, as-is,
+ * plus a received_at timestamp.
  */
 
 'use strict';
@@ -33,25 +34,20 @@ async function connect() {
   return collection;
 }
 
-// Flattens the top-level keys of `obj` into individual key/value documents
-// and inserts them, tagged with the batch they arrived in.
-async function saveKeyValues(obj, batchId) {
+// Inserts the whole incoming JSON object as a single document.
+async function saveEventBatch(obj) {
   const col = await connect();
-  const received_at = new Date();
 
-  const docs = Object.entries(obj || {}).map(([key, value]) => ({
-    key,
-    value,
-    batch_id: batchId ?? null,
-    received_at,
-  }));
+  const doc = {
+    ...obj,
+    received_at: new Date(),
+  };
 
-  if (docs.length === 0) return { insertedCount: 0 };
-  return col.insertMany(docs);
+  return col.insertOne(doc);
 }
 
 async function close() {
   if (client) await client.close();
 }
 
-module.exports = { connect, saveKeyValues, close };
+module.exports = { connect, saveEventBatch, close };

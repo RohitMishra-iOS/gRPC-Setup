@@ -111,7 +111,7 @@ function startGrpcServer() {
     }
 
     try {
-      await db.saveKeyValues(body, body.batch_id);
+      await db.saveEventBatch(body);
     } catch (err) {
       console.error('[gRPC] DB save error:', err.message);
       callback(null, {
@@ -232,7 +232,7 @@ async function processEventsBatch(rawJson) {
   }
 
   try {
-    await db.saveKeyValues(body, body.batch_id);
+    await db.saveEventBatch(body);
   } catch (err) {
     return { statusCode: 500, payload: { ...body, status_code: 500, error: 'Database save failed', details: [err.message] } };
   }
