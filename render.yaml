@@ -44,3 +44,13 @@ services:
       # Leave as * for open access during development.
       - key: ALLOWED_ORIGINS
         value: "*"
+
+      # MongoDB Atlas — required for persisting incoming event batches.
+      # sync: false → Render prompts for the value in the dashboard instead
+      # of storing the secret in this file. Set these under the service's
+      # Environment tab after the Blueprint is created.
+      - key: MONGODB_URI
+        sync: false
+
+      - key: MONGODB_DB_NAME
+        value: "grpc_status"
