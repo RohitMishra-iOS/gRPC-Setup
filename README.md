@@ -1,6 +1,6 @@
 # gRPC Status Server
 
-A lightweight gRPC server exposing a `StatusService` with a single `CheckStatus` RPC.  
+A lightweight Rust gRPC server exposing a `StatusService` with a single `CheckStatus` RPC.  
 Works with **React (web)**, **React Native**, **Android**, and **iOS**.
 
 ---
@@ -9,29 +9,33 @@ Works with **React (web)**, **React Native**, **Android**, and **iOS**.
 
 ```
 server/
-├── server.js            # gRPC server (port 50051)
-├── grpc-web-proxy.js    # HTTP/1.1 → gRPC proxy for browsers (port 8080)
+├── src/
+│   ├── main.rs          # Config + starts both servers in one process
+│   ├── grpc.rs          # StatusService / CheckStatus (native gRPC, port 50051)
+│   ├── proxy.rs         # gRPC-Web, /events, /health, CORS (port 8080)
+│   ├── events.rs        # Event batch validation
+│   └── db.rs            # MongoDB persistence
+├── build.rs             # Generates Rust code from status.proto
 ├── status.proto         # Protobuf service definition
+├── Cargo.toml
+├── Dockerfile
 ├── .env                 # Environment variables (not committed)
-├── .env.example         # Template for .env
-├── .gitignore
-└── package.json
+└── .env.example         # Template for .env
 ```
 
 ---
 
 ## Quick Start
 
+Requires Rust (`brew install rust` or https://rustup.rs) and `protoc` (`brew install protobuf`).
+
 ```bash
 cd server
-npm install
-
-# Start gRPC server only
-npm start
-
-# Start gRPC server + web proxy together
-npm run start:all
+cargo run            # dev build
+cargo run --release  # optimized build
 ```
+
+One process serves both native gRPC (port 50051) and gRPC-Web (port 8080).
 
 ---
 
@@ -40,9 +44,11 @@ npm run start:all
 | Variable          | Default     | Description                                          |
 |-------------------|-------------|------------------------------------------------------|
 | `GRPC_HOST`       | `0.0.0.0`   | Host the gRPC server binds to                        |
-| `GRPC_PORT`       | `50051`      | Port for native gRPC clients (Android, iOS, Node)    |
-| `PROXY_PORT`      | `8080`       | Port for the gRPC-Web proxy (React / browser)        |
+| `GRPC_PORT`       | `50051`      | Port for native gRPC clients (Android, iOS)          |
+| `PORT` / `PROXY_PORT` | `8080`   | Port for gRPC-Web (React / browser); Render sets `PORT` |
 | `ALLOWED_ORIGINS` | `*`          | Comma-separated CORS origins (`*` = allow all)       |
+| `MONGODB_URI`     | —            | **Required.** MongoDB connection string              |
+| `MONGODB_DB_NAME` | `grpc_status` | Database name                                       |
 
 Copy `.env.example` → `.env` and adjust as needed.
 
@@ -214,21 +220,18 @@ print(response.code, response.status, response.message)
 ## Running in Development
 
 ```bash
-# Terminal 1 — gRPC server
-node server.js
-
-# Terminal 2 — gRPC-Web proxy (needed only for React/browser clients)
-node grpc-web-proxy.js
+cargo run
 ```
 
-Or both together:
+With auto-reload on file changes (`cargo install cargo-watch`):
 ```bash
-npm run start:all
+cargo watch -x run
 ```
 
-With auto-reload on file changes:
+Docker (same image Render builds):
 ```bash
-npm run dev
+docker build -t grpc-status-server .
+docker run --env-file .env -p 8080:8080 grpc-status-server
 ```
 
 ---
@@ -237,5 +240,5 @@ npm run dev
 
 | Port   | Protocol       | Used by                          |
 |--------|----------------|----------------------------------|
-| `50051`| gRPC (HTTP/2)  | Android, iOS, Node.js            |
+| `50051`| gRPC (HTTP/2)  | Android, iOS                     |
 | `8080` | HTTP/1.1 (CORS)| React (web), React Native (web)  |

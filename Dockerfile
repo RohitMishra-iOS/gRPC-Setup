@@ -1,40 +1,44 @@
-# ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:20-slim AS deps
+# ── Stage 1: build ────────────────────────────────────────────────────────────
+FROM rust:1-slim-bookworm AS build
+
+# protoc + google/protobuf/*.proto includes, needed by build.rs (tonic-build)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy only package files first for better layer caching
-COPY package.json package-lock.json ./
+# Build dependencies first for better layer caching
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs \
+ && echo 'fn main() {}' > build.rs \
+ && cargo build --release \
+ && rm -rf src build.rs
 
-# Install production dependencies only
-RUN npm ci --omit=dev
+# Build the real application
+COPY build.rs status.proto ./
+COPY src ./src
+RUN touch src/main.rs build.rs && cargo build --release
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM node:20-slim AS runner
+FROM debian:bookworm-slim AS runner
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Copy production node_modules from deps stage
-COPY --from=deps /app/node_modules ./node_modules
-
-# Copy application source
-COPY server.js         ./server.js
-COPY db.js             ./db.js
-COPY grpc-web-proxy.js ./grpc-web-proxy.js
-COPY status.proto      ./status.proto
-COPY package.json      ./package.json
+COPY --from=build /app/target/release/grpc-status-server ./grpc-status-server
 
 # ── Environment defaults ───────────────────────────────────────────────────────
 # PORT is injected by Render automatically — this is the public-facing port
-# for the gRPC-Web proxy. Do NOT set it here; let Render control it.
-ENV NODE_ENV=production \
-    GRPC_PORT=50051 \
+# for the gRPC-Web server. Do NOT set it here; let Render control it.
+ENV GRPC_PORT=50051 \
     GRPC_HOST=0.0.0.0 \
     ALLOWED_ORIGINS=*
 
-# Expose the gRPC-Web proxy port (Render overrides this with its own PORT)
+# Expose the gRPC-Web port (Render overrides this with its own PORT)
 EXPOSE 8080
 
-# node:20-slim ships with dumb-init equivalent; use node directly.
-# Node 20 handles SIGTERM correctly for graceful shutdown.
-CMD ["node", "server.js"]
+# The binary handles SIGTERM itself for graceful shutdown.
+CMD ["./grpc-status-server"]

@@ -23,21 +23,17 @@ services:
     # gRPC-Web proxy port (public). No need to set it here.
 
     # Health check — Render pings this to confirm the container is up.
-    # We use the proxy port; a 405 (Method Not Allowed on GET) is fine —
-    # it means the server is running.
-    healthCheckPath: /
+    # GET /health returns 200 with {"status":"ok"}.
+    healthCheckPath: /health
 
     envVars:
       # Internal gRPC server port — NOT exposed publicly, only used inside
-      # the container between server.js gRPC and the proxy.
+      # the container (native gRPC; the public port serves gRPC-Web).
       - key: GRPC_PORT
         value: "50051"
 
       - key: GRPC_HOST
         value: "0.0.0.0"
-
-      - key: NODE_ENV
-        value: "production"
 
       # Set this to your frontend domain(s) in production, e.g.:
       # https://yourapp.onrender.com,https://yourapp.com

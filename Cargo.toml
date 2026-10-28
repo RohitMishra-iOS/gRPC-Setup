@@ -1,0 +1,23 @@
+[package]
+name = "grpc-status-server"
+version = "1.0.0"
+edition = "2021"
+description = "gRPC Status Server - compatible with React, React Native, Android, iOS"
+
+[dependencies]
+axum = "0.7"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dotenvy = "0.15"
+mongodb = "3"
+prost = "0.13"
+prost-types = "0.13"
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.12"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[profile.release]
+strip = true
