@@ -1,0 +1,153 @@
+.grpc-demo {
+  max-width: 480px;
+  margin: 2rem auto;
+  padding: 1.5rem 2rem;
+  border: 1px solid #3a3a3a;
+  border-radius: 10px;
+  background: #1a1a1a;
+  color: #e4e4e4;
+  font-family: inherit;
+}
+
+.grpc-demo h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.25rem;
+  color: #fff;
+}
+
+.grpc-demo__desc {
+  margin: 0 0 1.25rem;
+  font-size: 0.875rem;
+  color: #888;
+}
+
+.grpc-demo__desc code {
+  background: #2a2a2a;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: #b4b4ff;
+}
+
+.grpc-demo__form label {
+  display: block;
+  font-size: 0.85rem;
+  color: #aaa;
+  margin-bottom: 0.4rem;
+}
+
+.grpc-demo__row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.grpc-demo__row--url input {
+  width: 100%;
+  font-size: 0.85rem;
+  color: #a0a0ff;
+}
+
+.grpc-demo__row input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #111;
+  color: #e4e4e4;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.grpc-demo__row input:focus {
+  border-color: #646cff;
+}
+
+.grpc-demo__row input:disabled {
+  opacity: 0.5;
+}
+
+.grpc-demo__row button {
+  padding: 0.5rem 1.1rem;
+  border: none;
+  border-radius: 6px;
+  background: #646cff;
+  color: #fff;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.grpc-demo__row button:hover:not(:disabled) {
+  background: #535bf2;
+}
+
+.grpc-demo__row button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.grpc-demo__result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 1.25rem;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.grpc-demo__result--ok {
+  background: #0d2b1a;
+  border: 1px solid #1a5c33;
+}
+
+.grpc-demo__result--error {
+  background: #2b0d0d;
+  border: 1px solid #5c1a1a;
+}
+
+.grpc-demo__label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #777;
+}
+
+.grpc-demo__result--ok .grpc-demo__value {
+  color: #6ee7a0;
+  font-weight: 500;
+}
+
+.grpc-demo__result--error .grpc-demo__value {
+  color: #f87171;
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.grpc-demo__table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.grpc-demo__table td {
+  padding: 0.25rem 0.5rem;
+  vertical-align: top;
+}
+
+.grpc-demo__key {
+  color: #888;
+  white-space: nowrap;
+  width: 5rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.grpc-demo__val {
+  color: #6ee7a0;
+  font-weight: 500;
+  word-break: break-all;
+}
