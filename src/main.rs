@@ -14,13 +14,22 @@
 //!   React / React Native (web) → PROXY_PORT  (gRPC-Web over HTTP/1.1)
 //!   Android / iOS              → GRPC_PORT   (native gRPC over HTTP/2)
 
+mod config;
 mod db;
+mod dm;
 mod events;
 mod grpc;
 mod proxy;
+#[cfg(test)]
+mod tests;
 
 pub mod pb {
     tonic::include_proto!("status");
+}
+
+/// dm.sdk.v1 — Crashlytics / Remote Config / Performance / Messaging (dm_sdk.proto).
+pub mod pb_dm {
+    tonic::include_proto!("dm.sdk.v1");
 }
 
 use std::time::Duration;
@@ -29,10 +38,38 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
+use crate::config::Config;
 use crate::db::Db;
+use crate::dm::services::DmSvc;
+use crate::dm::AppState;
 use crate::pb::status_service_server::StatusServiceServer;
+use crate::pb_dm::crashlytics_service_server::CrashlyticsServiceServer;
+use crate::pb_dm::messaging_service_server::MessagingServiceServer;
+use crate::pb_dm::performance_service_server::PerformanceServiceServer;
+use crate::pb_dm::remote_config_service_server::RemoteConfigServiceServer;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Crash/performance batches can be large (stack traces, MetricKit JSON).
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+fn log_config(config: &Config) {
+    if config.auth_enabled() {
+        println!("✅  API keys            → {} configured (x-api-key required on dm.sdk.v1)", config.api_keys.len());
+    } else {
+        println!("⚠️  DM_API_KEYS unset   → dm.sdk.v1 services accept unauthenticated calls (dev only)");
+    }
+    println!(
+        "{}  Admin API           → {}",
+        if config.admin_key.is_some() { "✅" } else { "⚠️ " },
+        if config.admin_key.is_some() { "enabled at /admin" } else { "disabled (set DM_ADMIN_KEY)" }
+    );
+    println!(
+        "{}  APNs                → {}",
+        if config.apns.is_some() { "✅" } else { "⚠️ " },
+        if config.apns.is_some() { "configured" } else { "not configured (push sending disabled)" }
+    );
+}
 
 /// Like JS `process.env.X || default`: unset and empty both count as missing.
 pub fn env_nonempty(key: &str) -> Option<String> {
@@ -74,9 +111,11 @@ async fn run() -> Result<(), BoxError> {
     let proxy_port = env_port(&["PORT", "PROXY_PORT"], 8080)?;
     let grpc_port = env_port(&["GRPC_PORT"], 50051)?;
     let grpc_host = env_nonempty("GRPC_HOST").unwrap_or_else(|| "0.0.0.0".into());
-    let allowed_origins = env_nonempty("ALLOWED_ORIGINS").unwrap_or_else(|| "*".into());
+    let config = Config::from_env();
 
-    let db = Db::connect().await?;
+    let db = Db::connect(config.retention_days, config.analytics_retention_days).await?;
+    log_config(&config);
+    let state = AppState::new(db.clone(), config)?;
 
     // ── 1. gRPC Server ───────────────────────────────────────────────────────
     let grpc_listener = bind(&grpc_host, grpc_port, "GRPC_PORT").await?;
@@ -85,12 +124,16 @@ async fn run() -> Result<(), BoxError> {
         .http2_keepalive_interval(Some(Duration::from_secs(10)))
         .http2_keepalive_timeout(Some(Duration::from_secs(5)))
         .add_service(StatusServiceServer::new(grpc::StatusSvc { db: db.clone() }))
+        .add_service(CrashlyticsServiceServer::new(DmSvc(state.clone())).max_decoding_message_size(MAX_MESSAGE_BYTES))
+        .add_service(RemoteConfigServiceServer::new(DmSvc(state.clone())))
+        .add_service(PerformanceServiceServer::new(DmSvc(state.clone())).max_decoding_message_size(MAX_MESSAGE_BYTES))
+        .add_service(MessagingServiceServer::new(DmSvc(state.clone())))
         .serve_with_incoming(TcpListenerStream::new(grpc_listener));
 
     // ── 2. gRPC-Web server ───────────────────────────────────────────────────
     let proxy_listener = bind("0.0.0.0", proxy_port, "PORT or PROXY_PORT").await?;
     println!("✅  gRPC-Web proxy     → public  port {proxy_port}");
-    let proxy_server = axum::serve(proxy_listener, proxy::router(proxy::AppState { db, allowed_origins }));
+    let proxy_server = axum::serve(proxy_listener, proxy::router(state));
 
     println!();
     println!("──────────────────────────────────────────");

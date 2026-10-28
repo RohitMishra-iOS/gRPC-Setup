@@ -50,3 +50,30 @@ services:
 
       - key: MONGODB_DB_NAME
         value: "grpc_status"
+
+      # ── DM SDK 2.0 (Crashlytics / Remote Config / Performance / Messaging) ──
+      # API keys the iOS SDK sends as x-api-key. Comma-separated; "app_id:key" scopes a key to
+      # one app. Leave unset only for local development (calls are then unauthenticated).
+      - key: DM_API_KEYS
+        sync: false
+
+      # Admin API (/admin/...) key. Unset = admin API disabled.
+      - key: DM_ADMIN_KEY
+        sync: false
+
+      # Days to keep crash / performance / push documents (TTL). 0 = forever.
+      - key: DM_RETENTION_DAYS
+        value: "90"
+
+      # Optional: Slack-compatible webhook for new-issue / regression / velocity crash alerts.
+      - key: DM_ALERT_WEBHOOK_URL
+        sync: false
+
+      # APNs token auth for sending pushes (Apple Developer → Keys → a key with APNs enabled).
+      # APNS_KEY_P8 = full contents of the .p8 file (newlines may be written as \n).
+      - key: APNS_KEY_P8
+        sync: false
+      - key: APNS_KEY_ID
+        sync: false
+      - key: APNS_TEAM_ID
+        sync: false

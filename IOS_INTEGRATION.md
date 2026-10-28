@@ -1,3 +1,5 @@
+> **2.0:** the DM iOS SDK (Analytics, Crashlytics, Remote Config, Performance, Messaging) talks to this server over gRPC-Web — see **README.md → Connecting the iOS SDK**. This file documents the original 1.x `CheckStatus` integration, which is unchanged.
+
 # iOS Integration — StatusService / CheckStatus
 
 This documents what changed on the server and exactly what the iOS app

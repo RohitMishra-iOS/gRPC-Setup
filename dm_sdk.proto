@@ -1,0 +1,258 @@
+syntax = "proto3";
+
+// Backend contract for the DM SDK's Crashlytics, Remote Config, Performance and Messaging
+// modules. (Analytics keeps using status.StatusService/CheckStatus, unchanged.)
+//
+// Transport: gRPC-Web over HTTP/1.1 (application/grpc-web+proto), same as CheckStatus — the client
+// is DMGrpcWebClient in this folder. Every request carries these headers:
+//   x-api-key            DMGrpcBackend(apiKey:)          — authenticate the app
+//   x-dm-app-id          DMOptions.appId
+//   x-dm-installation-id DMApp.installationId
+//   x-dm-sdk-version     e.g. "2.0.0"
+//
+// Status handling the client relies on (send a real grpc-status trailer):
+//   OK (0)                                         → success
+//   UNAVAILABLE (14), DEADLINE_EXCEEDED (4), INTERNAL (13), ABORTED (10), UNKNOWN (2)
+//                                                  → retried later with backoff, data kept
+//   RESOURCE_EXHAUSTED (8)                         → throttled; Remote Config honours a
+//                                                    "retry-after-seconds" trailer if present
+//   anything else (INVALID_ARGUMENT, UNAUTHENTICATED, PERMISSION_DENIED, …)
+//                                                  → permanent, data dropped
+//
+// Regenerate the Swift code after editing (see README):
+//   protoc dm_sdk.proto -I. --swift_out=. --swift_opt=Visibility=Internal
+
+package dm.sdk.v1;
+
+// ---------------------------------------------------------------------------------------------
+// Shared
+// ---------------------------------------------------------------------------------------------
+
+// Who is calling. Present on every request.
+message ClientContext {
+  string app_id = 1;            // DMOptions.appId
+  string installation_id = 2;   // stable per install; join key across all modules
+  string user_id = 3;           // Analytics user id, "" if none
+  string platform = 4;          // "ios"
+  string sdk_version = 5;
+  string bundle_id = 6;
+  string app_version = 7;       // CFBundleShortVersionString
+  string app_build = 8;         // CFBundleVersion
+  string os_version = 9;
+  string device_model = 10;     // hardware identifier, e.g. "iPhone15,3"
+  string locale = 11;
+  string timezone = 12;
+  string network_type = 13;     // wifi | cellular | ethernet | other | none | unknown
+}
+
+// Empty acknowledgement — success is signalled by grpc-status OK.
+message Ack {}
+
+// ---------------------------------------------------------------------------------------------
+// Crashlytics
+// ---------------------------------------------------------------------------------------------
+
+service CrashlyticsService {
+  // 1–10 reports per call. Must be idempotent on CrashReport.id (a retry after a lost response
+  // re-sends the same ids).
+  rpc UploadCrashReports(UploadCrashReportsRequest) returns (Ack);
+}
+
+enum CrashKind {
+  CRASH_KIND_UNSPECIFIED = 0;
+  CRASH_KIND_SIGNAL = 1;                 // fatal POSIX signal
+  CRASH_KIND_EXCEPTION = 2;              // fatal uncaught NSException
+  CRASH_KIND_NON_FATAL_ERROR = 3;        // DMCrashlytics.record(error:)
+  CRASH_KIND_CUSTOM_EXCEPTION = 4;       // DMCrashlytics.record(exceptionModel:)
+  CRASH_KIND_METRIC_KIT_DIAGNOSTIC = 5;  // MXDiagnosticPayload JSON in metric_kit_json
+}
+
+message UploadCrashReportsRequest {
+  ClientContext context = 1;             // the UPLOADING launch
+  repeated CrashReport reports = 2;
+}
+
+message CrashReport {
+  string id = 1;
+  CrashKind kind = 2;
+  bool is_fatal = 3;
+  int64 timestamp_ms = 4;                // when it happened
+  string launch_id = 5;                  // the process run it happened in
+
+  // App/device AT CRASH TIME (may differ from context after an update).
+  string app_version = 6;
+  string app_build = 7;
+  string os_version = 8;
+  string device_model = 9;
+  string bundle_id = 10;
+
+  string user_id = 11;
+  map<string, string> custom_keys = 12;
+  repeated string logs = 13;             // oldest first, "HH:mm:ss.SSS message"
+  repeated Breadcrumb breadcrumbs = 14;  // oldest first
+
+  string exception_name = 15;            // NSException name / custom name / NSError domain
+  string exception_reason = 16;
+  int64 error_code = 17;
+  map<string, string> error_user_info = 18;
+
+  int32 signal_number = 19;
+  string signal_name = 20;               // "SIGSEGV", …
+  int32 signal_code = 21;
+  uint64 fault_address = 22;
+
+  // Crashed/recording thread, innermost first. For signal crashes frame 0 is the exact PC;
+  // the rest are return addresses (symbolicate address - 1).
+  repeated uint64 return_addresses = 23;
+  repeated StackFrame frames = 24;       // pre-symbolicated frames (custom exceptions)
+  repeated BinaryImage binary_images = 25;
+
+  string metric_kit_json = 26;
+}
+
+message Breadcrumb {
+  int64 timestamp_ms = 1;
+  string name = 2;
+  map<string, string> params = 3;
+}
+
+message StackFrame {
+  string symbol = 1;
+  string file = 2;
+  int64 line = 3;
+  uint64 address = 4;
+  string library = 5;
+}
+
+// Symbolication: find the image with load_address <= addr < load_address + size, then look up
+// (addr - load_address + <__TEXT vmaddr of the dSYM>) in the dSYM whose UUID == uuid
+// (atos -o <dSYM> -arch arm64 -l <load_address> <addr>). dSYMs are uploaded at build time by
+// Scripts/dm_upload_symbols.sh.
+message BinaryImage {
+  string name = 1;
+  string uuid = 2;                       // LC_UUID, uppercase with dashes (matches `dwarfdump --uuid`)
+  uint64 load_address = 3;
+  uint64 size = 4;                       // __TEXT vmsize
+  bool is_main_executable = 5;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Remote Config
+// ---------------------------------------------------------------------------------------------
+
+service RemoteConfigService {
+  rpc FetchConfig(FetchConfigRequest) returns (FetchConfigResponse);
+}
+
+message FetchConfigRequest {
+  ClientContext context = 1;
+  map<string, string> user_properties = 2;  // Analytics user properties, for conditions
+  map<string, string> custom_signals = 3;   // DMRemoteConfig.setCustomSignals
+  int64 last_template_version = 4;          // 0 = device has none
+  string language_code = 5;                 // e.g. "en-IN"
+  string country_code = 6;                  // e.g. "IN"
+  bool is_realtime_check = 7;               // listener poll / silent push, not an app fetch
+}
+
+enum FetchState {
+  FETCH_STATE_UNSPECIFIED = 0;
+  FETCH_STATE_UPDATED = 1;                  // entries = full config for this device
+  FETCH_STATE_NO_CHANGE = 2;                // template_version <= last_template_version; entries empty
+  FETCH_STATE_NO_TEMPLATE = 3;              // no config for this app; device falls back to defaults
+}
+
+message FetchConfigResponse {
+  FetchState state = 1;
+  map<string, string> entries = 2;          // conditions already evaluated server-side
+  int64 template_version = 3;
+  repeated Experiment experiments = 4;      // experiments this install is enrolled in
+}
+
+message Experiment {
+  string experiment_id = 1;
+  string variant_id = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Performance
+// ---------------------------------------------------------------------------------------------
+
+service PerformanceService {
+  // Must be idempotent on PerfRecord.id.
+  rpc UploadPerformance(UploadPerformanceRequest) returns (Ack);
+}
+
+enum PerfKind {
+  PERF_KIND_UNSPECIFIED = 0;
+  PERF_KIND_TRACE = 1;                      // custom DMTrace
+  PERF_KIND_NETWORK_REQUEST = 2;
+  PERF_KIND_SCREEN_RENDERING = 3;           // counters total_frames / slow_frames / frozen_frames
+  PERF_KIND_APP_START = 4;                  // "_app_start"
+  PERF_KIND_APP_FOREGROUND = 5;             // "_app_in_foreground"
+  PERF_KIND_APP_BACKGROUND = 6;             // "_app_in_background"
+  PERF_KIND_METRIC_KIT = 7;                 // MXMetricPayload JSON in metric_kit_json
+}
+
+message UploadPerformanceRequest {
+  ClientContext context = 1;
+  repeated PerfRecord records = 2;
+}
+
+message PerfRecord {
+  string id = 1;
+  PerfKind kind = 2;
+  string name = 3;
+  int64 start_time_ms = 4;
+  int64 duration_us = 5;
+  map<string, int64> counters = 6;
+  map<string, string> attributes = 7;
+
+  // Network requests only. url has no query string or fragment.
+  string request_url = 8;
+  string http_method = 9;
+  int32 response_code = 10;                 // 0 = transport error (see attributes["error"])
+  int64 request_payload_bytes = 11;
+  int64 response_payload_bytes = 12;
+  string response_content_type = 13;
+
+  string metric_kit_json = 14;
+  string app_version = 15;                  // when measured
+  string os_version = 16;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Messaging
+// ---------------------------------------------------------------------------------------------
+
+service MessagingService {
+  // Create or refresh this install's push registration. Return the same registration_token
+  // for the same installation_id unless you deliberately rotate it.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+  rpc UpdateTopicSubscription(UpdateTopicSubscriptionRequest) returns (Ack);
+  rpc UnregisterDevice(UnregisterDeviceRequest) returns (Ack);
+}
+
+message RegisterDeviceRequest {
+  ClientContext context = 1;
+  string apns_token = 2;                    // lowercase hex
+  string apns_environment = 3;              // "sandbox" | "production" — which APNs host to use
+  string notification_authorization = 4;    // authorized | denied | notDetermined | provisional | ephemeral
+  string previous_registration_token = 5;
+  repeated string topics = 6;               // full current topic set (for reconciliation)
+}
+
+message RegisterDeviceResponse {
+  string registration_token = 1;
+}
+
+message UpdateTopicSubscriptionRequest {
+  ClientContext context = 1;
+  string registration_token = 2;
+  string topic = 3;
+  bool subscribe = 4;                       // false = unsubscribe
+}
+
+message UnregisterDeviceRequest {
+  ClientContext context = 1;
+  string registration_token = 2;
+}

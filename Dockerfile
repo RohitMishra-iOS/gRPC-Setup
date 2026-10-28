@@ -16,7 +16,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
  && rm -rf src build.rs
 
 # Build the real application
-COPY build.rs status.proto ./
+COPY build.rs status.proto dm_sdk.proto ./
 COPY src ./src
 RUN touch src/main.rs build.rs && cargo build --release
 
