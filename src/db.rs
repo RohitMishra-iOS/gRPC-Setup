@@ -94,6 +94,11 @@ impl Db {
         Self::from_database(Client::with_uri_str(uri).await.expect("uri").database("dm_test"))
     }
 
+    /// Any collection by name (platform services keep their collection names in their modules).
+    pub fn coll(&self, name: &str) -> Collection<Document> {
+        self.database.collection(name)
+    }
+
     pub fn dsym_bucket(&self) -> GridFsBucket {
         self.database
             .gridfs_bucket(GridFsBucketOptions::builder().bucket_name("dsyms".to_string()).build())
@@ -150,6 +155,7 @@ impl Db {
         ttl(&self.database, &self.push_messages, retention_days).await;
         // Analytics data predates 2.0 and may be wanted forever: separate setting, default off.
         ttl(&self.database, &self.event_data, analytics_retention_days).await;
+        crate::platform::ensure_schema(self).await?;
         Ok(())
     }
 
@@ -226,7 +232,7 @@ impl Db {
     }
 }
 
-async fn index(coll: &Collection<Document>, keys: Document, name: &str, unique: bool) -> Result<(), BoxError> {
+pub async fn index(coll: &Collection<Document>, keys: Document, name: &str, unique: bool) -> Result<(), BoxError> {
     let options = IndexOptions::builder().name(name.to_string()).unique(unique.then_some(true)).build();
     match coll.create_index(IndexModel::builder().keys(keys).options(options).build()).await {
         Ok(_) => Ok(()),

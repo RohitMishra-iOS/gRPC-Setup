@@ -69,6 +69,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/crashlytics/issues/:issue_id/trend", get(analytics::issue_trend))
         .route("/crashlytics/reports/:report_id", get(analytics::report_detail))
         .route("/messaging/:app_id/history", get(analytics::push_history))
+        .merge(crate::platform::admin::routes())
         .layer(axum::middleware::from_fn_with_state(state, require_admin))
 }
 

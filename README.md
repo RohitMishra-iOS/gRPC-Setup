@@ -418,6 +418,48 @@ print(response.code, response.status, response.message)
 
 ---
 
+## Platform services (3.0)
+
+Everything below is plain JSON over HTTPS under `/v1` (plus one WebSocket), shared by the iOS,
+Android and JS SDKs. Every call sends `x-api-key` + `x-dm-app-id`; add `authorization: Bearer <ID token>`
+for a signed-in user and `x-dm-appcheck: <token>` when App Check is enforced. Errors use the Google
+API shape: `{"error": {"code": 403, "status": "PERMISSION_DENIED", "reason": "…", "message": "…"}}`.
+
+| Product | Endpoints | Notes |
+|---|---|---|
+| Installations | `POST /v1/installations`, `POST /v1/installations/:fid/auth-token`, `DELETE /v1/installations/:fid` | Firebase-shaped FID (22 chars), refresh token + 7-day auth token |
+| App Check | `POST /v1/appcheck/exchange`, `/v1/appcheck/challenge`, `/v1/appcheck/verify` | Providers: debug, App Attest, DeviceCheck, Play Integrity; custom provider = `POST /admin/appcheck/:app/token` from your backend; limited-use tokens |
+| Auth | `POST /v1/accounts/{signUp, signInWithPassword, signInWithCustomToken, signInWithIdp, signInWithEmailLink, lookup, update, delete, sendOobCode, resetPassword}`, `POST /v1/token` | 1-hour ID tokens (Firebase-shaped claims), refresh tokens, anonymous → permanent linking, Google + Apple ID tokens, password reset / email verification / email-link sign-in, lockout after 10 failed passwords |
+| Storage | `/v1/storage/b/:bucket/o…`, `/v1/storage/upload/:session` | GridFS; simple, multipart and resumable (256 KB chunks) uploads; Range downloads; download tokens; custom metadata; security rules |
+| Functions | `POST /v1/functions/:name` | Your HTTPS endpoint gets `{data, context: {auth, app, instance_id}}` + `X-DM-Signature`; JSON or streaming (SSE) responses |
+| Database | `/v1/db/documents/*`, `/v1/db/{commit, query, aggregate, beginTransaction, rollback}`, WebSocket `/v1/db/listen` | Documents & subcollections, typed values, field transforms, atomic batches, optimistic transactions, compound/OR queries, cursors, collection groups, count/sum/avg, live listeners, security rules |
+| JSON RPC | `POST /v1/rpc/:service/:method` | Every dm.sdk.v1 RPC (Crashlytics, Remote Config, Performance, Messaging) as proto3 JSON |
+
+Full request/response formats are documented at the top of each file in `src/platform/`.
+
+**Security rules** (Storage and Database) are edited in the console or with
+`PUT /admin/rules/{storage|database}`:
+
+```json
+[
+  {"match": "users/{uid}/{rest=**}", "read": "auth.uid == uid", "write": "auth.uid == uid"},
+  {"match": "posts/{id}", "read": "true",
+   "create": "auth != null && request.resource.data.author == auth.uid",
+   "update": "auth.uid == resource.data.author", "delete": "auth.uid == resource.data.author"}
+]
+```
+
+Default (no rules saved): signed-in users can read and write everything. Expression language:
+`== != < <= > >= && || ! in + - * /`, `.size() .matches(re) .keys() .hasAll() .hasAny() .hasOnly()`.
+
+**Admin API** additions (same `x-admin-key`): `/admin/platform/overview`, `/admin/auth/users…`,
+`/admin/auth/custom-token`, `/admin/auth/email-link`, `/admin/auth/verify-id-token`,
+`/admin/appcheck/…`, `/admin/installations`, `/admin/storage/…`, `/admin/db/…`, `/admin/rules/…`,
+`/admin/functions…` — see `src/platform/admin.rs`.
+
+**Testing:** start a MongoDB replica set locally, run the server with `tests/e2e.env`, then
+`python3 tests/e2e_platform.py` (75 end-to-end checks).
+
 ## Running in Development
 
 ```bash
