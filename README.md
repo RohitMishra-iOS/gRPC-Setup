@@ -433,6 +433,7 @@ API shape: `{"error": {"code": 403, "status": "PERMISSION_DENIED", "reason": "�
 | Storage | `/v1/storage/b/:bucket/o…`, `/v1/storage/upload/:session` | GridFS; simple, multipart and resumable (256 KB chunks) uploads; Range downloads; download tokens; custom metadata; security rules |
 | Functions | `POST /v1/functions/:name` | Your HTTPS endpoint gets `{data, context: {auth, app, instance_id}}` + `X-DM-Signature`; JSON or streaming (SSE) responses |
 | Database | `/v1/db/documents/*`, `/v1/db/{commit, query, aggregate, beginTransaction, rollback}`, WebSocket `/v1/db/listen` | Documents & subcollections, typed values, field transforms, atomic batches, optimistic transactions, compound/OR queries, cursors, collection groups, count/sum/avg, live listeners, security rules |
+| Push (all platforms) | `POST /admin/messaging/send` | One send API fans out to APNs (iOS), FCM HTTP v1 (Android, `DM_FCM_SERVICE_ACCOUNT`) and Web Push with VAPID + aes128gcm (browsers, `DM_WEBPUSH_VAPID_PRIVATE_KEY`; public key at `GET /v1/messaging/webpush-key`) |
 | JSON RPC | `POST /v1/rpc/:service/:method` | Every dm.sdk.v1 RPC (Crashlytics, Remote Config, Performance, Messaging) as proto3 JSON |
 
 Full request/response formats are documented at the top of each file in `src/platform/`.
@@ -458,7 +459,7 @@ Default (no rules saved): signed-in users can read and write everything. Express
 `/admin/functions…` — see `src/platform/admin.rs`.
 
 **Testing:** start a MongoDB replica set locally, run the server with `tests/e2e.env`, then
-`python3 tests/e2e_platform.py` (75 end-to-end checks).
+`python3 tests/e2e_platform.py` (75 end-to-end checks) and `python3 tests/e2e_webpush.py` (Web Push decrypted by the RFC 8291 reference implementation).
 
 ## Running in Development
 

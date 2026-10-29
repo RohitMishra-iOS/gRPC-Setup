@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/auth/config", get(auth::public_config))
         .route("/functions/:name", post(functions::call))
         .route("/rpc/:service/:method", post(rpc_json::call))
+        .route("/messaging/webpush-key", get(webpush_key))
         .merge(storage::router().layer(DefaultBodyLimit::max(storage_limit)))
         .merge(database::router())
         .fallback(any(|| async { ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", "no such endpoint") }))
@@ -91,6 +92,14 @@ async fn ttl_on(db: &crate::db::Db, collection: &str, field: &str) {
     let model = mongodb::IndexModel::builder().keys(doc! { field: 1 }).options(options).build();
     if let Err(err) = db.coll(collection).create_index(model).await {
         eprintln!("⚠️  TTL index on {collection}.{field}: {err}");
+    }
+}
+
+/// The VAPID public key browsers subscribe with (PushManager.subscribe applicationServerKey).
+async fn webpush_key(axum::extract::State(state): axum::extract::State<AppState>) -> ApiResult {
+    match &state.webpush {
+        Some(wp) => ok(json!({ "publicKey": wp.public_key() })),
+        None => Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "WEBPUSH_NOT_CONFIGURED", "set DM_WEBPUSH_VAPID_PRIVATE_KEY (generate with POST /admin/messaging/webpush/keys)")),
     }
 }
 

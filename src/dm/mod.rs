@@ -9,11 +9,13 @@ pub mod alerts;
 pub mod apns;
 pub mod conditions;
 pub mod crashlytics;
+pub mod fcm;
 pub mod messaging;
 pub mod performance;
 pub mod remote_config;
 pub mod services;
 pub mod symbols;
+pub mod webpush;
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -37,6 +39,10 @@ pub struct Inner {
     pub http: reqwest::Client,
     pub rc: remote_config::RcState,
     pub apns: Option<apns::ApnsClient>,
+    /// Android push (DM_FCM_SERVICE_ACCOUNT).
+    pub fcm: Option<fcm::FcmClient>,
+    /// Browser push (DM_WEBPUSH_VAPID_PRIVATE_KEY).
+    pub webpush: Option<webpush::WebPushClient>,
     /// Signs/verifies every token the platform services issue.
     pub tokens: crate::platform::tokens::Tokens,
     /// Fan-out of database writes to live listeners.
@@ -60,7 +66,9 @@ impl AppState {
             None => None,
         };
         let tokens = crate::platform::tokens::Tokens::new(&config.platform.token_secret);
-        Ok(Self(Arc::new(Inner { db, config, http, rc: remote_config::RcState::default(), apns, tokens, live: Default::default() })))
+        let fcm = fcm::FcmClient::from_env().transpose()?;
+        let webpush = webpush::WebPushClient::from_env().transpose()?;
+        Ok(Self(Arc::new(Inner { db, config, http, rc: remote_config::RcState::default(), apns, fcm, webpush, tokens, live: Default::default() })))
     }
 }
 

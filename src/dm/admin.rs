@@ -52,6 +52,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/remote-config/:app_id/preview", post(preview))
         .route("/messaging/send", post(send))
         .route("/messaging/:app_id/devices", get(device_stats))
+        .route("/messaging/webpush/keys", post(webpush_keys))
         .route("/crashlytics/:app_id/issues", get(list_issues))
         .route("/crashlytics/issues/:issue_id", get(get_issue).patch(update_issue))
         .route("/stability/:app_id", get(stability))
@@ -361,8 +362,8 @@ async fn send(State(state): State<AppState>, AxumJson(request): AxumJson<SendReq
     if matches!(request.target, Target::All(false)) {
         return Err(error(StatusCode::BAD_REQUEST, "target {\"all\": false} matches nobody — use {\"all\": true} to send to every device"));
     }
-    if state.apns.is_none() && !request.dry_run {
-        return Err(error(StatusCode::FAILED_DEPENDENCY, "APNs not configured — set APNS_KEY_P8/APNS_KEY_ID/APNS_TEAM_ID"));
+    if state.apns.is_none() && state.fcm.is_none() && state.webpush.is_none() && !request.dry_run {
+        return Err(error(StatusCode::FAILED_DEPENDENCY, "no push channel configured — set APNs (APNS_*), FCM (DM_FCM_SERVICE_ACCOUNT) and/or Web Push (DM_WEBPUSH_VAPID_PRIVATE_KEY)"));
     }
     let summary = deliver(&state, request, None).await.map_err(db_error)?;
     ok(summary)
@@ -370,8 +371,8 @@ async fn send(State(state): State<AppState>, AxumJson(request): AxumJson<SendReq
 
 /// Silent `{"dm": {"rc_update": "1"}}` push to every active device of the app, in the background.
 fn spawn_config_update_push(state: &AppState, app_id: &str) -> &'static str {
-    if state.apns.is_none() {
-        return "skipped: APNs not configured";
+    if state.apns.is_none() && state.fcm.is_none() && state.webpush.is_none() {
+        return "skipped: no push channel configured";
     }
     let request = SendRequest {
         app_id: app_id.to_string(),
@@ -413,43 +414,78 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
         let recipients = state.db.devices.count_documents(filter).await?;
         return Ok(json!({ "dry_run": true, "recipients": recipients, "payload": payload }));
     }
-    let Some(apns) = state.apns.as_ref() else {
-        return Ok(json!({ "error": "APNs not configured" }));
-    };
-
     let cursor = state
         .db
         .devices
         .find(filter)
-        .projection(doc! { "_id": 1, "apns_token": 1, "apns_environment": 1, "bundle_id": 1 })
+        .projection(doc! { "_id": 1, "transport": 1, "apns_token": 1, "apns_environment": 1, "bundle_id": 1, "fcm_token": 1, "web_push": 1 })
         .await?;
 
     let payload_ref = &payload;
     let collapse_id = request.collapse_id.as_deref();
     let ttl_seconds = request.ttl_seconds;
-    let results: Vec<(String, Result<(), super::apns::ApnsError>)> = cursor
+    let notification_json = request.notification.as_ref().map(|n| json!({ "title": n.title, "body": n.body, "image_url": n.image_url, "subtitle": n.subtitle }));
+    let notification_ref = notification_json.as_ref();
+    // FCM / Web Push carry the same `dm` block and custom data as the APNs payload.
+    let mut portable = request.data.clone();
+    portable.insert("dm".into(), payload["dm"].clone());
+    let portable_ref = &portable;
+    let results: Vec<(String, Result<(), (String, bool)>)> = cursor
         .filter_map(|device| async move { device.ok() })
         .map(|device| async move {
             let id = device.get_str("_id").unwrap_or_default().to_string();
-            let token = device.get_str("apns_token").unwrap_or_default();
-            let environment = device.get_str("apns_environment").unwrap_or("production");
-            let topic = device
-                .get_str("bundle_id")
-                .ok()
-                .filter(|t| !t.is_empty())
-                .or(apns.default_topic())
-                .unwrap_or_default();
-            let result = apns
-                .send(PushRequest {
-                    device_token: token,
-                    environment,
-                    topic,
-                    payload: payload_ref,
-                    silent,
-                    collapse_id,
-                    ttl_seconds,
-                })
-                .await;
+            let result = match device.get_str("transport").unwrap_or("apns") {
+                "fcm" => match state.fcm.as_ref() {
+                    None => Err(("FcmNotConfigured".to_string(), false)),
+                    Some(fcm) => fcm
+                        .send(&super::fcm::FcmMessage {
+                            token: device.get_str("fcm_token").unwrap_or_default(),
+                            notification: notification_ref,
+                            data: portable_ref.clone(),
+                            ttl_seconds,
+                            collapse_key: collapse_id,
+                            high_priority: !silent,
+                        })
+                        .await
+                        .map_err(|e| (e.reason.split_whitespace().next().unwrap_or("FcmError").to_string(), e.is_invalid_token())),
+                },
+                "webpush" => match (state.webpush.as_ref(), device.get_document("web_push").ok()) {
+                    (None, _) => Err(("WebPushNotConfigured".to_string(), false)),
+                    (_, None) => Err(("NoSubscription".to_string(), true)),
+                    (Some(wp), Some(sub)) => {
+                        let message = json!({ "notification": notification_ref, "data": portable_ref });
+                        wp.send(
+                            &super::webpush::Subscription { endpoint: sub.get_str("endpoint").unwrap_or_default(), p256dh: sub.get_str("p256dh").unwrap_or_default(), auth: sub.get_str("auth").unwrap_or_default() },
+                            &message,
+                            ttl_seconds,
+                            !silent,
+                            collapse_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            eprintln!("[Messaging] web push failed: {}", e.reason);
+                            (format!("WebPush{}", e.status), e.is_invalid_token())
+                        })
+                    }
+                },
+                _ => match state.apns.as_ref() {
+                    None => Err(("ApnsNotConfigured".to_string(), false)),
+                    Some(apns) => {
+                        let topic = device.get_str("bundle_id").ok().filter(|t| !t.is_empty()).or(apns.default_topic()).unwrap_or_default();
+                        apns.send(PushRequest {
+                            device_token: device.get_str("apns_token").unwrap_or_default(),
+                            environment: device.get_str("apns_environment").unwrap_or("production"),
+                            topic,
+                            payload: payload_ref,
+                            silent,
+                            collapse_id,
+                            ttl_seconds,
+                        })
+                        .await
+                        .map_err(|e| (e.reason.clone(), e.is_invalid_token()))
+                    }
+                },
+            };
             (id, result)
         })
         .buffer_unordered(64)
@@ -462,9 +498,9 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
     for (id, result) in &results {
         match result {
             Ok(()) => sent += 1,
-            Err(err) => {
-                *failures.entry(err.reason.clone()).or_default() += 1;
-                if err.is_invalid_token() {
+            Err((reason, invalid_token)) => {
+                *failures.entry(reason.clone()).or_default() += 1;
+                if *invalid_token {
                     invalid.push(id.clone());
                 }
             }
@@ -476,7 +512,7 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
             .devices
             .update_many(
                 doc! { "_id": { "$in": &invalid } },
-                doc! { "$set": { "active": false, "invalid_reason": "apns_rejected", "updated_at": DateTime::now() } },
+                doc! { "$set": { "active": false, "invalid_reason": "push_service_rejected", "updated_at": DateTime::now() } },
             )
             .await?;
     }
@@ -554,11 +590,17 @@ fn build_payload(request: &SendRequest, message_id: &str, extra_dm: Option<Json>
     Json::Object(payload)
 }
 
+/// Generates a VAPID key pair for Web Push (set DM_WEBPUSH_VAPID_PRIVATE_KEY to the private key).
+async fn webpush_keys() -> ApiResult {
+    let (private_pem, public_key) = super::webpush::generate_keys();
+    ok(json!({ "private_key_pem": private_pem, "public_key": public_key, "env": "DM_WEBPUSH_VAPID_PRIVATE_KEY (use \\n for newlines on one line)" }))
+}
+
 async fn device_stats(State(state): State<AppState>, Path(app_id): Path<String>) -> ApiResult {
     let pipeline = vec![
         doc! { "$match": { "app_id": &app_id } },
         doc! { "$group": {
-            "_id": { "active": "$active", "environment": "$apns_environment", "authorization": "$notification_authorization" },
+            "_id": { "active": "$active", "environment": { "$ifNull": ["$apns_environment", { "$ifNull": ["$transport", "apns"] }] }, "authorization": "$notification_authorization", "transport": { "$ifNull": ["$transport", "apns"] } },
             "devices": { "$sum": 1 },
         }},
         doc! { "$sort": { "devices": -1 } },
