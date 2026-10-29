@@ -96,6 +96,7 @@ pub async fn upload(State(state): State<AppState>, headers: HeaderMap, mut multi
 
     let mut fields: HashMap<String, String> = HashMap::new();
     let mut archive: Option<tempfile::NamedTempFile> = None;
+    let mut mapping_text: Option<Vec<u8>> = None;
 
     loop {
         let field = match multipart.next_field().await {
@@ -104,7 +105,12 @@ pub async fn upload(State(state): State<AppState>, headers: HeaderMap, mut multi
             Err(err) => return error(StatusCode::BAD_REQUEST, &format!("bad multipart body: {err}")),
         };
         let name = field.name().unwrap_or_default().to_string();
-        if name == "dsym" {
+        if name == "mapping" {
+            match field.bytes().await {
+                Ok(bytes) => mapping_text = Some(bytes.to_vec()),
+                Err(err) => return error(StatusCode::BAD_REQUEST, &format!("could not read mapping: {err}")),
+            }
+        } else if name == "dsym" {
             match spool_to_temp(field).await {
                 Ok(file) => archive = Some(file),
                 Err(err) => return error(StatusCode::BAD_REQUEST, &format!("could not read dsym: {err}")),
@@ -119,8 +125,25 @@ pub async fn upload(State(state): State<AppState>, headers: HeaderMap, mut multi
         }
     }
 
+    // Android: R8/ProGuard mapping.txt for one versionName/versionCode.
+    if let Some(text) = mapping_text {
+        let app_id = fields.get("app_id").cloned().or(meta.app_id.clone()).unwrap_or_default();
+        let version = fields.get("app_version").cloned().unwrap_or_default();
+        let build = fields.get("app_build").cloned().unwrap_or_default();
+        if app_id.is_empty() || version.is_empty() {
+            return error(StatusCode::BAD_REQUEST, "mapping uploads need x-dm-app-id (or app_id) and app_version (+ app_build = versionCode)");
+        }
+        return match super::mapping::store(&state, &app_id, &version, &build, text).await {
+            Ok(result) => {
+                println!("[Symbols] stored R8 mapping {app_id} {version} ({build})");
+                (StatusCode::OK, axum::Json(result)).into_response()
+            }
+            Err(err) => error(StatusCode::SERVICE_UNAVAILABLE, &format!("storage failed: {err}")),
+        };
+    }
+
     let Some(archive) = archive else {
-        return error(StatusCode::BAD_REQUEST, "multipart field `dsym` (zipped .dSYM or DWARF binary) is required");
+        return error(StatusCode::BAD_REQUEST, "multipart field `dsym` (zipped .dSYM or DWARF binary) or `mapping` (R8 mapping.txt) is required");
     };
 
     let slices = match tokio::task::spawn_blocking(move || extract_slices(archive.path())).await {
