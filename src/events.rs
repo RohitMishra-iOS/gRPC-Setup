@@ -3,6 +3,15 @@
 //! Accepts an analytics-style event batch as JSON:
 //!   { events: [{ timestamp_ms, session_id, name, params }, ...], instance_id, ... }
 //! Validation: every event must have a numeric timestamp_ms and a non-blank name.
+//!
+//! Store-and-forward contract (Firebase-style, see the "Applying this to analytics-sdk-ios" notes):
+//!  * `batch_id` is an idempotency key. The first copy is stored; a retried copy (client timed out
+//!    after the server saved it) is acknowledged with `"duplicate": true` and not stored again.
+//!  * Every response carries `"accepted": true|false` — clients delete queued rows only on true.
+//!  * One `analytics_users` document per (app_id, installation_id) keeps first/last seen, the
+//!    latest user id, user properties, app/device snapshot and the last session.
+//!  * `"debug": true` batches (debug builds / launch argument) are stored with the flag so
+//!    DebugView can filter on them.
 
 use serde_json::{json, Value as Json};
 
@@ -47,12 +56,28 @@ pub async fn process_batch(db: &Db, body: &Json) -> (u16, Json) {
         return (400, merge(body, json!({ "status_code": 400, "error": "Validation failed", "details": errors })));
     }
 
-    if let Err(err) = db.save_event_batch(body).await {
-        eprintln!("[DB] save error: {err}");
-        return (500, merge(body, json!({ "status_code": 500, "error": "Database save failed", "details": [err.to_string()] })));
+    match db.claim_batch(body).await {
+        Ok(false) => {
+            println!("[Events] duplicate batch_id={} ignored", batch_id_label(body));
+            return (200, merge(body, json!({ "status_code": 200, "accepted": true, "duplicate": true })));
+        }
+        Ok(true) => {}
+        Err(err) => {
+            eprintln!("[DB] batch claim error: {err}");
+            return (500, merge(body, json!({ "status_code": 500, "accepted": false, "error": "Database save failed", "details": [err.to_string()] })));
+        }
     }
 
-    (200, merge(body, json!({ "status_code": 200 })))
+    if let Err(err) = db.save_event_batch(body).await {
+        eprintln!("[DB] save error: {err}");
+        db.release_batch(body).await; // let the client's retry store it
+        return (500, merge(body, json!({ "status_code": 500, "accepted": false, "error": "Database save failed", "details": [err.to_string()] })));
+    }
+    if let Err(err) = db.upsert_analytics_user(body).await {
+        eprintln!("[DB] analytics user upsert error: {err}"); // the batch itself is safe
+    }
+
+    (200, merge(body, json!({ "status_code": 200, "accepted": true, "duplicate": false })))
 }
 
 /// Parses a raw JSON string, then validates + persists it.
