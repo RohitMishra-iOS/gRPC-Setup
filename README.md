@@ -224,7 +224,9 @@ H="x-admin-key: $DM_ADMIN_KEY"; B=https://<your-service>.onrender.com
 curl -X PUT -H "$H" -H 'content-type: application/json' --data @template.json "$B/admin/remote-config/dmart-ready-ios?notify=true"
 curl -H "$H" "$B/admin/remote-config/dmart-ready-ios"
 curl -H "$H" "$B/admin/remote-config/dmart-ready-ios/versions"
-curl -X POST -H "$H" "$B/admin/remote-config/dmart-ready-ios/rollback/3"
+curl -H "$H" "$B/admin/remote-config/dmart-ready-ios/versions/3"          # one version's template
+curl -H "$H" "$B/admin/remote-config/dmart-ready-ios/fetch-stats?hours=24" # fetch counts for the console
+curl -X POST -H "$H" "$B/admin/remote-config/dmart-ready-ios/rollback/3?notify=true&by=Rohit"
 curl -X POST -H "$H" -H 'content-type: application/json' "$B/admin/remote-config/dmart-ready-ios/preview" \
      -d '{"context": {"country": "IN", "app_version": "2.1.0", "user_properties": {"membership_tier": "gold"}}}'
 
