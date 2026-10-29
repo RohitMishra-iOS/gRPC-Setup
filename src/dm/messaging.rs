@@ -17,14 +17,37 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
     let context = require_context(request.context, meta)?;
     authorize(&state.config, meta, &context.app_id)?;
 
-    let apns_token = request.apns_token.to_lowercase();
-    if !is_valid_apns_token(&apns_token) {
-        return Err(Status::invalid_argument("apns_token must be a hex string"));
-    }
-    let environment = match request.apns_environment.as_str() {
-        "sandbox" | "production" => request.apns_environment.clone(),
-        "" => "production".to_string(),
-        other => return Err(Status::invalid_argument(format!("unknown apns_environment '{other}'"))),
+    let transport = if request.push_transport.is_empty() { "apns" } else { request.push_transport.as_str() };
+    // The transport-specific address of this install, and the field that must be unique per app.
+    let (address_field, address, extra): (&str, String, mongodb::bson::Document) = match transport {
+        "apns" => {
+            let apns_token = request.apns_token.to_lowercase();
+            if !is_valid_apns_token(&apns_token) {
+                return Err(Status::invalid_argument("apns_token must be a hex string"));
+            }
+            let environment = match request.apns_environment.as_str() {
+                "sandbox" | "production" => request.apns_environment.clone(),
+                "" => "production".to_string(),
+                other => return Err(Status::invalid_argument(format!("unknown apns_environment '{other}'"))),
+            };
+            ("apns_token", apns_token, doc! { "apns_environment": environment })
+        }
+        "fcm" => {
+            let token = request.fcm_token.trim().to_string();
+            if token.len() < 20 || token.len() > 4096 || token.contains(char::is_whitespace) {
+                return Err(Status::invalid_argument("fcm_token is required for push_transport=fcm"));
+            }
+            ("fcm_token", token, doc! {})
+        }
+        "webpush" => {
+            let sub = request.web_push.clone().ok_or_else(|| Status::invalid_argument("web_push subscription is required for push_transport=webpush"))?;
+            let insecure_ok = crate::env_nonempty("DM_WEBPUSH_ALLOW_HTTP_ENDPOINTS").is_some_and(|v| v == "true"); // local testing only
+            if !(sub.endpoint.starts_with("https://") || (insecure_ok && sub.endpoint.starts_with("http://"))) || sub.p256dh.is_empty() || sub.auth.is_empty() {
+                return Err(Status::invalid_argument("web_push needs an https endpoint, p256dh and auth"));
+            }
+            ("web_push.endpoint", sub.endpoint.clone(), doc! { "web_push": { "endpoint": &sub.endpoint, "p256dh": &sub.p256dh, "auth": &sub.auth } })
+        }
+        other => return Err(Status::invalid_argument(format!("unknown push_transport '{other}' (apns, fcm, webpush)"))),
     };
     if let Some(bad) = request.topics.iter().find(|t| !is_valid_topic(t)) {
         return Err(Status::invalid_argument(format!("invalid topic '{bad}'")));
@@ -45,8 +68,8 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
                         "app_id": &context.app_id,
                         "installation_id": &context.installation_id,
                         "user_id": non_empty(&context.user_id),
-                        "apns_token": &apns_token,
-                        "apns_environment": &environment,
+                        "transport": transport,
+                        "platform": &context.platform,
                         "notification_authorization": &request.notification_authorization,
                         "topics": &request.topics,
                         "bundle_id": &context.bundle_id,
@@ -67,6 +90,13 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
             )
             .upsert(true)
             .await;
+        if result.is_ok() {
+            let mut set = extra.clone();
+            if transport != "webpush" {
+                set.insert(address_field, &address);
+            }
+            let _ = state.db.devices.update_one(doc! { "_id": &token }, doc! { "$set": set }).await;
+        }
         match result {
             Ok(_) => {
                 // The same APNs token can't belong to two live installs (e.g. after a reinstall);
@@ -75,7 +105,7 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
                     .db
                     .devices
                     .update_many(
-                        doc! { "app_id": &context.app_id, "apns_token": &apns_token, "_id": { "$ne": &token } },
+                        doc! { "app_id": &context.app_id, address_field: &address, "_id": { "$ne": &token } },
                         doc! { "$set": { "active": false, "invalid_reason": "superseded", "updated_at": now } },
                     )
                     .await;

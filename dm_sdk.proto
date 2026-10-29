@@ -239,6 +239,17 @@ message RegisterDeviceRequest {
   string notification_authorization = 4;    // authorized | denied | notDetermined | provisional | ephemeral
   string previous_registration_token = 5;
   repeated string topics = 6;               // full current topic set (for reconciliation)
+  // Which push channel delivers to this install. Empty = "apns" (1.x/2.x iOS clients).
+  string push_transport = 7;                // "apns" | "fcm" (Android) | "webpush" (browsers)
+  string fcm_token = 8;                     // push_transport = "fcm"
+  WebPushSubscription web_push = 9;         // push_transport = "webpush"
+}
+
+// The browser's PushSubscription (PushManager.subscribe with the server's VAPID public key).
+message WebPushSubscription {
+  string endpoint = 1;
+  string p256dh = 2;                        // base64url, uncompressed P-256 public key
+  string auth = 3;                          // base64url, 16-byte auth secret
 }
 
 message RegisterDeviceResponse {
