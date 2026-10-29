@@ -77,6 +77,11 @@ const collections = {
     required: ["app_id", "version", "template", "created_at"],
     properties: { app_id: str, version: long, template: { bsonType: "object" }, description: strOrNull, published_by: str, created_at: date },
   },
+  rc_fetches: {
+    description: "One document per Remote Config fetch, for the console's Fetches chart (7-day TTL)",
+    required: ["app_id", "installation_id", "received_at"],
+    properties: { app_id: str, installation_id: str, received_at: date },
+  },
   symbol_files: {
     description: "dSYM index. _id = Mach-O UUID; the DWARF binary lives in GridFS bucket 'dsyms'",
     required: ["_id", "gridfs_id", "text_vmaddr", "uploaded_at"],
@@ -139,6 +144,10 @@ index("devices", { app_id: 1, user_id: 1 }, "app_user");
 index("devices", { apns_token: 1 }, "apns_token");
 
 index("rc_templates", { app_id: 1, version: -1 }, "app_version_unique", true);
+index("rc_fetches", { app_id: 1, received_at: -1 }, "app_received");
+try {
+  target.rc_fetches.createIndex({ received_at: 1 }, { name: "ttl_received_at", expireAfterSeconds: 7 * 86400 });
+} catch (e) { print(`  ! rc_fetches TTL: ${e.codeName || e.message}`); }
 index("symbol_files", { bundle_id: 1, app_version: 1 }, "bundle_version");
 index("push_messages", { app_id: 1, created_at: -1 }, "app_created");
 

@@ -32,6 +32,7 @@ pub const CRASH_ISSUES: &str = "crash_issues";
 pub const PERF_RECORDS: &str = "perf_records";
 pub const DEVICES: &str = "devices";
 pub const RC_TEMPLATES: &str = "rc_templates";
+pub const RC_FETCHES: &str = "rc_fetches";
 pub const SYMBOL_FILES: &str = "symbol_files";
 pub const PUSH_MESSAGES: &str = "push_messages";
 
@@ -44,6 +45,8 @@ pub struct Db {
     pub perf_records: Collection<Document>,
     pub devices: Collection<Document>,
     pub rc_templates: Collection<Document>,
+    /// One document per Remote Config fetch (console statistics), expires after 7 days.
+    pub rc_fetches: Collection<Document>,
     pub symbol_files: Collection<Document>,
     pub push_messages: Collection<Document>,
 }
@@ -70,6 +73,7 @@ impl Db {
             perf_records: database.collection(PERF_RECORDS),
             devices: database.collection(DEVICES),
             rc_templates: database.collection(RC_TEMPLATES),
+            rc_fetches: database.collection(RC_FETCHES),
             symbol_files: database.collection(SYMBOL_FILES),
             push_messages: database.collection(PUSH_MESSAGES),
             database,
@@ -91,7 +95,7 @@ impl Db {
     pub async fn ensure_schema(&self, retention_days: u32, analytics_retention_days: u32) -> Result<(), BoxError> {
         let existing = self.database.list_collection_names().await?;
         for name in [
-            EVENT_DATA, CRASH_REPORTS, CRASH_ISSUES, PERF_RECORDS, DEVICES, RC_TEMPLATES, SYMBOL_FILES,
+            EVENT_DATA, CRASH_REPORTS, CRASH_ISSUES, PERF_RECORDS, DEVICES, RC_TEMPLATES, RC_FETCHES, SYMBOL_FILES,
             PUSH_MESSAGES,
         ] {
             if !existing.iter().any(|e| e == name) {
@@ -123,6 +127,8 @@ impl Db {
         index(&self.devices, doc! { "apns_token": 1 }, "apns_token", false).await?;
 
         index(&self.rc_templates, doc! { "app_id": 1, "version": -1 }, "app_version_unique", true).await?;
+        index(&self.rc_fetches, doc! { "app_id": 1, "received_at": -1 }, "app_received", false).await?;
+        ttl(&self.database, &self.rc_fetches, 7).await;
         index(&self.symbol_files, doc! { "bundle_id": 1, "app_version": 1 }, "bundle_version", false).await?;
         index(&self.push_messages, doc! { "app_id": 1, "created_at": -1 }, "app_created", false).await?;
 
