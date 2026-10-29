@@ -303,11 +303,23 @@ const WINDOW: Duration = Duration::from_secs(3600);
 pub struct RcState {
     cache: Mutex<HashMap<String, (Instant, Option<Arc<StoredTemplate>>)>>,
     fetches: Mutex<HashMap<(String, bool), Vec<Instant>>>,
+    /// Wakes real-time checks that are waiting for a publish (long polling).
+    published: tokio::sync::Notify,
 }
 
 impl RcState {
+    /// Called after every publish/rollback: drops the cached template and wakes waiting devices.
     pub fn invalidate(&self, app_id: &str) {
         self.cache.lock().expect("rc cache").remove(app_id);
+        self.published.notify_waiters();
+    }
+
+    /// Test hook: serve `template` for `app_id` from the cache (no MongoDB) and wake waiters.
+    #[cfg(test)]
+    pub(crate) fn publish_cached(&self, app_id: &str, template: Option<StoredTemplate>) {
+        let entry = (Instant::now() + Duration::from_secs(3600), template.map(Arc::new));
+        self.cache.lock().expect("rc cache").insert(app_id.to_string(), entry);
+        self.published.notify_waiters();
     }
 
     async fn template(&self, state: &AppState, app_id: &str) -> Result<Option<Arc<StoredTemplate>>, mongodb::error::Error> {
@@ -357,7 +369,26 @@ pub async fn fetch_config(state: &AppState, meta: &RequestMeta, request: FetchCo
         return Err(status);
     }
 
-    let Some(stored) = state.rc.template(state, &context.app_id).await.map_err(unavailable)? else {
+    // Real-time checks long-poll: when nothing newer than the device's version is published, hold
+    // the request open (up to DM_RC_REALTIME_HOLD_SECONDS) and answer as soon as a publish lands.
+    // Devices therefore see console changes within a second, without APNs.
+    let hold = if request.is_realtime_check { Duration::from_secs(state.config.rc_realtime_hold_seconds) } else { Duration::ZERO };
+    let deadline = tokio::time::Instant::now() + hold;
+    let stored = loop {
+        // Register for the wake-up *before* reading, so a publish in between can't be missed.
+        let notified = state.rc.published.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let stored = state.rc.template(state, &context.app_id).await.map_err(unavailable)?;
+        let current = stored.as_ref().map_or(0, |t| t.version);
+        if hold.is_zero() || current > request.last_template_version {
+            break stored;
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            break stored; // held long enough: answer NO_CHANGE, the device asks again
+        }
+    };
+    let Some(stored) = stored else {
         return Ok(FetchConfigResponse { state: FetchState::NoTemplate as i32, ..Default::default() });
     };
 

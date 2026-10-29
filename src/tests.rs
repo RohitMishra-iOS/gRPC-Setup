@@ -100,6 +100,62 @@ async fn remote_config_throttling_sends_retry_after() {
     assert!(retry > 3000 && retry <= 3600, "retry-after {retry}");
 }
 
+fn stored(version: i64, banner: &str) -> crate::dm::remote_config::StoredTemplate {
+    let template = serde_json::from_value(serde_json::json!({
+        "parameters": { "show_diwali_banner": { "default_value": banner } }
+    }))
+    .unwrap();
+    crate::dm::remote_config::StoredTemplate { version, template }
+}
+
+fn realtime(last_version: i64) -> Vec<u8> {
+    FetchConfigRequest { context: context("dmart"), last_template_version: last_version, is_realtime_check: true, ..Default::default() }
+        .encode_to_vec()
+}
+
+#[tokio::test]
+async fn realtime_check_long_polls_until_publish() {
+    use crate::pb_dm::{FetchConfigResponse, FetchState};
+    let s = state(100).await;
+    s.rc.publish_cached("dmart", Some(stored(1, "false")));
+    let key = meta(Some("key-dmart"));
+
+    // Device already has v1: the check waits; a publish 300 ms later answers it immediately.
+    let started = std::time::Instant::now();
+    let waiter = {
+        let (s, key) = (s.clone(), key.clone());
+        tokio::spawn(async move { dispatch(&s, &key, FETCH, &realtime(1)).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!waiter.is_finished(), "real-time check should be held open");
+    s.rc.publish_cached("dmart", Some(stored(2, "true")));
+    let body = waiter.await.unwrap().expect("fetch");
+    let response = FetchConfigResponse::decode(body.as_slice()).unwrap();
+    assert_eq!(response.state, FetchState::Updated as i32);
+    assert_eq!(response.template_version, 2);
+    assert_eq!(response.entries.get("show_diwali_banner").map(String::as_str), Some("true"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+    // Out-of-date device: answered at once, no hold.
+    let body = dispatch(&s, &key, FETCH, &realtime(1)).await.expect("fetch");
+    assert_eq!(FetchConfigResponse::decode(body.as_slice()).unwrap().template_version, 2);
+}
+
+#[tokio::test]
+async fn realtime_check_answers_no_change_after_hold() {
+    use crate::pb_dm::{FetchConfigResponse, FetchState};
+    let mut config = Config::from_env();
+    config.api_keys = vec![(Some("dmart".into()), "key-dmart".into())];
+    config.rc_realtime_hold_seconds = 1;
+    config.apns = None;
+    let s = AppState::new(Db::lazy(DEAD_MONGO).await, config).expect("state");
+    s.rc.publish_cached("dmart", Some(stored(3, "false")));
+    let started = std::time::Instant::now();
+    let body = dispatch(&s, &meta(Some("key-dmart")), FETCH, &realtime(3)).await.expect("fetch");
+    assert_eq!(FetchConfigResponse::decode(body.as_slice()).unwrap().state, FetchState::NoChange as i32);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+}
+
 #[tokio::test]
 async fn grpc_web_response_carries_status_trailer() {
     use axum::body::Body;

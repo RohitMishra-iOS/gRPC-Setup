@@ -30,6 +30,8 @@ pub struct Config {
     /// Remote Config fetches allowed per installation per hour (app-initiated / real-time).
     pub rc_fetches_per_hour: u32,
     pub rc_realtime_checks_per_hour: u32,
+    /// How long a real-time Remote Config check waits for a publish before answering NO_CHANGE.
+    pub rc_realtime_hold_seconds: u64,
     /// Crash alerts: Slack-compatible webhook (POST {"text": …}). None = log only.
     pub alert_webhook_url: Option<String>,
     /// Crashes of one issue within an hour that trigger a velocity alert.
@@ -66,6 +68,7 @@ impl Config {
             analytics_retention_days: parse_env("DM_ANALYTICS_RETENTION_DAYS", 0),
             rc_fetches_per_hour: parse_env("DM_RC_FETCHES_PER_HOUR", 30),
             rc_realtime_checks_per_hour: parse_env("DM_RC_REALTIME_CHECKS_PER_HOUR", 120),
+            rc_realtime_hold_seconds: parse_env("DM_RC_REALTIME_HOLD_SECONDS", 45),
             alert_webhook_url: env_nonempty("DM_ALERT_WEBHOOK_URL"),
             velocity_alert_threshold: parse_env("DM_VELOCITY_ALERT_THRESHOLD", 25),
             apns,
