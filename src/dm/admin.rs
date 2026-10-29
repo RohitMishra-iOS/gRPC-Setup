@@ -7,6 +7,8 @@
 //!     GET   /admin/remote-config/:app_id/versions            version history
 //!     PUT   /admin/remote-config/:app_id[?notify=true]       publish a new version (body = template);
 //!                                                            notify=true sends a silent rc_update push
+//!     GET   /admin/remote-config/:app_id/versions/:version   one version's full template
+//!     GET   /admin/remote-config/:app_id/fetch-stats?hours=24 fetch counts, users, time series
 //!     POST  /admin/remote-config/:app_id/rollback/:version   republish an old version as the newest
 //!     POST  /admin/remote-config/:app_id/preview             body {"context": {...}} → what that device gets
 //!   Messaging
@@ -44,6 +46,8 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/remote-config/:app_id", get(get_template).put(put_template))
         .route("/remote-config/:app_id/versions", get(list_versions))
+        .route("/remote-config/:app_id/versions/:version", get(get_version))
+        .route("/remote-config/:app_id/fetch-stats", get(fetch_stats))
         .route("/remote-config/:app_id/rollback/:version", post(rollback))
         .route("/remote-config/:app_id/preview", post(preview))
         .route("/messaging/send", post(send))
@@ -130,6 +134,59 @@ async fn list_versions(State(state): State<AppState>, Path(app_id): Path<String>
 struct PublishQuery {
     #[serde(default)]
     notify: bool,
+    /// Who is publishing (shown as "Last published by" in the console).
+    #[serde(default)]
+    by: Option<String>,
+}
+
+fn publisher(by: Option<String>, fallback: &str) -> String {
+    by.map(|b| b.trim().chars().take(80).collect::<String>())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+async fn get_version(State(state): State<AppState>, Path((app_id, version)): Path<(String, i64)>) -> ApiResult {
+    let stored = remote_config::template_version(&state, &app_id, version)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such version"))?;
+    ok(json!({ "app_id": app_id, "version": stored.version, "template": stored.template }))
+}
+
+#[derive(Deserialize)]
+struct StatsQuery {
+    #[serde(default = "default_hours")]
+    hours: i64,
+}
+fn default_hours() -> i64 {
+    24
+}
+
+/// Successful fetches (not real-time checks) in the last `hours`, in 10-minute buckets.
+async fn fetch_stats(State(state): State<AppState>, Path(app_id): Path<String>, Query(query): Query<StatsQuery>) -> ApiResult {
+    let hours = query.hours.clamp(1, 168);
+    let since = DateTime::from_millis(DateTime::now().timestamp_millis() - hours * 3_600_000);
+    let pipeline = vec![
+        doc! { "$match": { "app_id": &app_id, "received_at": { "$gte": since } } },
+        doc! { "$facet": {
+            "totals": [
+                { "$group": { "_id": Bson::Null, "fetches": { "$sum": 1 }, "users": { "$addToSet": "$installation_id" } } },
+                { "$project": { "_id": 0, "fetches": 1, "users": { "$size": "$users" } } },
+            ],
+            "series": [
+                { "$group": {
+                    "_id": { "$dateTrunc": { "date": "$received_at", "unit": "minute", "binSize": 10 } },
+                    "fetches": { "$sum": 1 },
+                } },
+                { "$sort": { "_id": 1 } },
+                { "$project": { "_id": 0, "t": "$_id", "fetches": 1 } },
+            ],
+        } },
+    ];
+    let mut cursor = state.db.rc_fetches.aggregate(pipeline).await.map_err(db_error)?;
+    let facet = cursor.try_next().await.map_err(db_error)?.map(to_json).unwrap_or(Json::Null);
+    let totals = facet["totals"].get(0).cloned().unwrap_or(json!({ "fetches": 0, "users": 0 }));
+    ok(json!({ "app_id": app_id, "hours": hours, "bucket_minutes": 10, "totals": totals, "series": facet["series"] }))
 }
 
 async fn put_template(
@@ -141,7 +198,8 @@ async fn put_template(
     let template: Template = serde_json::from_slice(&body)
         .map_err(|e| error(StatusCode::BAD_REQUEST, &format!("invalid template JSON: {e}")))?;
     template.validate().map_err(|e| error(StatusCode::BAD_REQUEST, &e))?;
-    let version = remote_config::publish(&state, &app_id, &template, "admin-api")
+    let by = publisher(query.by, "admin-api");
+    let version = remote_config::publish(&state, &app_id, &template, &by)
         .await
         .map_err(|e| error(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     println!("[RemoteConfig] published {app_id} v{version}");
@@ -149,15 +207,23 @@ async fn put_template(
     ok(json!({ "app_id": app_id, "version": version, "realtime_push": notified }))
 }
 
-async fn rollback(State(state): State<AppState>, Path((app_id, version)): Path<(String, i64)>) -> ApiResult {
+async fn rollback(
+    State(state): State<AppState>,
+    Path((app_id, version)): Path<(String, i64)>,
+    Query(query): Query<PublishQuery>,
+) -> ApiResult {
     let old = remote_config::template_version(&state, &app_id, version)
         .await
         .map_err(db_error)?
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such version"))?;
-    let new_version = remote_config::publish(&state, &app_id, &old.template, &format!("rollback-to-v{version}"))
+    let mut template = old.template;
+    template.description = Some(format!("Rolled back to version {version}"));
+    let by = publisher(query.by, "admin-api");
+    let new_version = remote_config::publish(&state, &app_id, &template, &by)
         .await
         .map_err(|e| error(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    ok(json!({ "app_id": app_id, "version": new_version, "rolled_back_to": version }))
+    let notified = if query.notify { Some(spawn_config_update_push(&state, &app_id)) } else { None };
+    ok(json!({ "app_id": app_id, "version": new_version, "rolled_back_to": version, "realtime_push": notified }))
 }
 
 #[derive(Deserialize, Default)]
