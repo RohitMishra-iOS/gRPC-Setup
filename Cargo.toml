@@ -1,12 +1,18 @@
 [package]
 name = "grpc-status-server"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
-description = "DM SDK backend: analytics, crashlytics, remote config, performance, messaging (gRPC + gRPC-Web)"
+description = "DM platform backend: analytics, crashlytics, remote config, performance, messaging, installations, app check, auth, storage, functions, realtime database"
 
 [dependencies]
 addr2line = "0.24"
-axum = { version = "0.7", features = ["multipart"] }
+argon2 = "0.5"
+base64 = "0.22"
+ciborium = "0.2"
+hmac = "0.12"
+pbjson = "0.7"
+rand = "0.8"
+axum = { version = "0.7", features = ["multipart", "ws"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
 futures-util = { version = "0.3", features = ["io"] }
@@ -17,7 +23,9 @@ object = "0.36"
 percent-encoding = "2"
 prost = "0.13"
 prost-types = "0.13"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json"] }
+ring = "0.17"
+regex-lite = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
@@ -26,12 +34,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.12"
 uuid = { version = "1", features = ["v4"] }
+x509-parser = { version = "0.16", features = ["verify"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]
+pbjson-build = "0.7"
 tonic-build = "0.12"
 
 [profile.release]

@@ -40,8 +40,12 @@ const MAX_BODY_BYTES: usize = crate::MAX_MESSAGE_BYTES;
 pub fn router(state: AppState) -> Router {
     let symbols_limit = state.config.symbols_max_bytes;
     Router::new()
-        .route("/v1/symbols", post(dm::symbols::upload).layer(DefaultBodyLimit::max(symbols_limit)))
         .nest("/admin", dm::admin::router(state.clone()))
+        .nest(
+            "/v1",
+            crate::platform::router(state.clone())
+                .route("/symbols", post(dm::symbols::upload).layer(DefaultBodyLimit::max(symbols_limit))),
+        )
         .fallback(handle_request)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn_with_state(state.clone(), cors))
@@ -206,17 +210,22 @@ fn set_cors_headers(allowed_origins: &str, req: &HeaderMap, res: &mut HeaderMap)
     };
 
     res.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, allow);
-    res.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, PUT, PATCH, OPTIONS"));
+    res.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"));
     res.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
             "content-type, x-grpc-web, x-user-agent, grpc-timeout, authorization, x-api-key, x-admin-key, \
-             x-dm-app-id, x-dm-installation-id, x-dm-sdk-version",
+             x-dm-app-id, x-dm-installation-id, x-dm-sdk-version, x-dm-appcheck, x-dm-installation-auth, \
+             x-goog-upload-protocol, x-goog-upload-command, x-goog-upload-offset, x-goog-upload-header-content-type, \
+             x-goog-upload-header-content-length",
         ),
     );
     res.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("grpc-status, grpc-message, retry-after-seconds, trailer, te"),
+        HeaderValue::from_static(
+            "grpc-status, grpc-message, retry-after-seconds, trailer, te, x-goog-upload-url, x-goog-upload-status, \
+             x-goog-upload-size-received, x-goog-upload-chunk-granularity, retry-after",
+        ),
     );
 }
 

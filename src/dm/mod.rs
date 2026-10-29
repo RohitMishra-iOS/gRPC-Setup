@@ -37,6 +37,10 @@ pub struct Inner {
     pub http: reqwest::Client,
     pub rc: remote_config::RcState,
     pub apns: Option<apns::ApnsClient>,
+    /// Signs/verifies every token the platform services issue.
+    pub tokens: crate::platform::tokens::Tokens,
+    /// Fan-out of database writes to live listeners.
+    pub live: crate::platform::database::LiveHub,
 }
 
 impl Deref for AppState {
@@ -55,7 +59,8 @@ impl AppState {
             Some(apns_config) => Some(apns::ApnsClient::new(apns_config.clone())?),
             None => None,
         };
-        Ok(Self(Arc::new(Inner { db, config, http, rc: remote_config::RcState::default(), apns })))
+        let tokens = crate::platform::tokens::Tokens::new(&config.platform.token_secret);
+        Ok(Self(Arc::new(Inner { db, config, http, rc: remote_config::RcState::default(), apns, tokens, live: Default::default() })))
     }
 }
 

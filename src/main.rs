@@ -19,6 +19,7 @@ mod db;
 mod dm;
 mod events;
 mod grpc;
+mod platform;
 mod proxy;
 #[cfg(test)]
 mod tests;
@@ -30,6 +31,7 @@ pub mod pb {
 /// dm.sdk.v1 — Crashlytics / Remote Config / Performance / Messaging (dm_sdk.proto).
 pub mod pb_dm {
     tonic::include_proto!("dm.sdk.v1");
+    include!(concat!(env!("OUT_DIR"), "/dm.sdk.v1.serde.rs"));
 }
 
 use std::time::Duration;
@@ -116,6 +118,10 @@ async fn run() -> Result<(), BoxError> {
     let db = Db::connect(config.retention_days, config.analytics_retention_days).await?;
     log_config(&config);
     let state = AppState::new(db.clone(), config)?;
+    if state.config.platform.token_secret_is_random {
+        println!("⚠️  DM_TOKEN_SECRET unset → random per-process secret (sessions end on restart)");
+    }
+    platform::database::start_change_stream(state.clone());
 
     // ── 1. gRPC Server ───────────────────────────────────────────────────────
     let grpc_listener = bind(&grpc_host, grpc_port, "GRPC_PORT").await?;
