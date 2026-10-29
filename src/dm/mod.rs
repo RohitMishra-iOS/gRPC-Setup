@@ -4,6 +4,7 @@
 //! gRPC (services.rs) and gRPC-Web (proxy.rs).
 
 pub mod admin;
+pub mod admin_analytics;
 pub mod alerts;
 pub mod apns;
 pub mod conditions;
