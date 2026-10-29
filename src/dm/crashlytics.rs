@@ -46,7 +46,7 @@ pub fn kind_name(kind: CrashKind) -> &'static str {
     }
 }
 
-async fn ingest(state: &AppState, context: &ClientContext, report: CrashReport) -> Result<(), Status> {
+async fn ingest(state: &AppState, context: &ClientContext, mut report: CrashReport) -> Result<(), Status> {
     if report.id.is_empty() {
         return Err(Status::invalid_argument("report.id is required"));
     }
@@ -69,10 +69,28 @@ async fn ingest(state: &AppState, context: &ClientContext, report: CrashReport) 
         })
         .collect();
 
-    let frames = if report.return_addresses.is_empty() {
-        Vec::new()
-    } else {
+    let mut retraced = false;
+    let frames = if !report.return_addresses.is_empty() {
         symbols::symbolicate(state, &images, &report.return_addresses, kind == CrashKind::Signal).await
+    } else if !report.frames.is_empty() && kind != CrashKind::CustomException {
+        // Android / web: frames arrive symbolicated by the runtime; R8-obfuscated ones are
+        // retraced with the build's mapping file when one has been uploaded.
+        let version = non_empty(&report.app_version).unwrap_or(&context.app_version).to_string();
+        let build = non_empty(&report.app_build).unwrap_or(&context.app_build).to_string();
+        let mapping = super::mapping::load(state, &context.app_id, &version, &build).await;
+        let client: Vec<super::mapping::ClientFrame> = report
+            .frames
+            .iter()
+            .map(|f| super::mapping::ClientFrame { symbol: &f.symbol, file: &f.file, line: f.line, library: &f.library })
+            .collect();
+        let (frames, any) = super::mapping::sym_frames(&client, mapping.as_deref());
+        retraced = any;
+        if let Some(name) = super::mapping::class_name(mapping.as_deref(), &report.exception_name) {
+            report.exception_name = name;
+        }
+        frames
+    } else {
+        Vec::new()
     };
     let symbolicated = frames.iter().any(|f| f.symbol.is_some());
     let metric_kit: Option<Json> = non_empty(&report.metric_kit_json).and_then(|j| serde_json::from_str(j).ok());
@@ -83,7 +101,10 @@ async fn ingest(state: &AppState, context: &ClientContext, report: CrashReport) 
     let app_version = non_empty(&report.app_version).unwrap_or(&context.app_version).to_string();
     let timestamp = if report.timestamp_ms > 0 { ms_to_datetime(report.timestamp_ms) } else { DateTime::now() };
 
-    let document = report_document(context, &report, kind, &frames, symbolicated, metric_kit, &issue_id, &app_version, timestamp);
+    let mut document = report_document(context, &report, kind, &frames, symbolicated, metric_kit, &issue_id, &app_version, timestamp);
+    if retraced {
+        document.insert("retraced", true);
+    }
     match state.db.crash_reports.insert_one(document).await {
         Ok(_) => {}
         Err(err) if is_duplicate_key(&err) => return Ok(()), // concurrent retry won the race
@@ -129,7 +150,8 @@ pub fn signature(report: &CrashReport, kind: CrashKind, frames: &[SymFrame], met
         },
         CrashKind::NonFatalError => IssueSignature {
             signature: format!("error|{}|{}|{frame_keys}", report.exception_name, report.error_code),
-            title: format!("{} ({})", report.exception_name, report.error_code),
+            // NSError domain + code on Apple; JVM/JS exceptions have no code.
+            title: if report.error_code == 0 { report.exception_name.clone() } else { format!("{} ({})", report.exception_name, report.error_code) },
             subtitle: if top_display.is_empty() { truncate(&report.exception_reason, 160) } else { top_display },
         },
         CrashKind::CustomException => {

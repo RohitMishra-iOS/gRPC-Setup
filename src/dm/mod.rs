@@ -10,6 +10,7 @@ pub mod apns;
 pub mod conditions;
 pub mod crashlytics;
 pub mod fcm;
+pub mod mapping;
 pub mod messaging;
 pub mod performance;
 pub mod remote_config;

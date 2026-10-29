@@ -47,7 +47,9 @@ pub const GRANULARITY: usize = 256 * 1024;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/storage/b/:bucket/o", get(list).post(upload))
-        .route("/storage/b/:bucket/o/:object", get(get_object).patch(update_metadata).delete(delete_object))
+        // POST = PATCH for clients whose HTTP stack has no PATCH (java.net.HttpURLConnection sends
+        // POST + X-HTTP-Method-Override: PATCH).
+        .route("/storage/b/:bucket/o/:object", get(get_object).patch(update_metadata).post(update_metadata).delete(delete_object))
         .route("/storage/upload/:session", put(resumable).post(resumable))
 }
 
