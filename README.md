@@ -116,6 +116,7 @@ keeps its 1.x behaviour of no expiry unless `DM_ANALYTICS_RETENTION_DAYS` is set
 | `DM_RETENTION_DAYS` | `90` | TTL for crash/perf/push documents (0 = forever) |
 | `DM_ANALYTICS_RETENTION_DAYS` | `0` | TTL for `event_data` (0 = forever) |
 | `DM_RC_FETCHES_PER_HOUR` / `DM_RC_REALTIME_CHECKS_PER_HOUR` | `30` / `120` | Remote Config throttle per installation |
+| `DM_RC_REALTIME_HOLD_SECONDS` | `45` | Real-time Remote Config checks are held open this long waiting for a publish (long polling), so devices get changes within ~1 s. Keep below the SDK's `fetchTimeout` (60 s). `0` disables |
 | `DM_ALERT_WEBHOOK_URL` | — | Slack-compatible webhook for crash alerts |
 | `DM_VELOCITY_ALERT_THRESHOLD` | `25` | Crashes of one issue per hour that trigger an alert |
 | `DM_SYMBOLS_MAX_MB` | `512` | Max dSYM upload |
