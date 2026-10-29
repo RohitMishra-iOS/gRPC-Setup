@@ -281,7 +281,7 @@ check("admin: rules simulator", r.ok and r.json()["allowed"] is False, r.text)
 
 # ── JSON RPC for the original five ──
 r = requests.post(f"{B}/v1/rpc/dm.sdk.v1.RemoteConfigService/FetchConfig", json={"context": {"appId": APP, "installationId": inst["fid"], "platform": "android"}}, headers=H)
-check("rpc: FetchConfig as proto3 JSON", r.ok and r.json().get("state") in ("NO_TEMPLATE", "FETCH_STATE_NO_TEMPLATE", "UPDATED", None), r.text)
+check("rpc: FetchConfig as proto3 JSON", r.ok and str(r.json().get("state", "FETCH_STATE_NO_TEMPLATE")).startswith("FETCH_STATE_"), r.text)
 r = requests.post(f"{B}/v1/rpc/dm.sdk.v1.MessagingService/RegisterDevice", json={"context": {"appId": APP, "installationId": inst["fid"]}}, headers=H)
 check("rpc: validation error → HTTP 400", r.status_code == 400, r.text)
 

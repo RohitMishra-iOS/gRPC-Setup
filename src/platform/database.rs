@@ -526,8 +526,34 @@ async fn check_rules(state: &AppState, caller: &Caller, path: &str, op: Op, inco
     rules::check(&rules, path, op, &rules_context(caller, op, incoming_json, existing_json)).map_err(ApiError::denied)
 }
 
-/// Applies writes atomically (MongoDB transaction when available). Returns the stored documents.
+/// Maps MongoDB errors inside a commit: transient transaction conflicts are retried by `commit`.
+fn tx_err(e: mongodb::error::Error) -> ApiError {
+    if e.contains_label(mongodb::error::TRANSIENT_TRANSACTION_ERROR) || e.contains_label(mongodb::error::UNKNOWN_TRANSACTION_COMMIT_RESULT) {
+        ApiError::new(StatusCode::CONFLICT, "TRANSIENT", "transient write conflict")
+    } else {
+        ApiError::db(e)
+    }
+}
+
+/// Applies writes atomically (MongoDB transaction when available). Transient conflicts between
+/// concurrent commits are retried here; a transaction whose reads changed fails with ABORTED
+/// (the SDKs then re-run the transaction function).
 pub async fn commit(state: &AppState, caller: &Caller, writes: Vec<Write>, transaction: Option<&str>) -> ApiResult<(i64, Vec<Option<Document>>)> {
+    let mut delay = 10u64;
+    for attempt in 1..=8 {
+        match commit_once(state, caller, writes.clone(), transaction).await {
+            Err(e) if e.reason == "TRANSIENT" && attempt < 8 => {
+                tokio::time::sleep(std::time::Duration::from_millis(delay + rand::random::<u64>() % delay)).await;
+                delay = (delay * 2).min(500);
+            }
+            Err(e) if e.reason == "TRANSIENT" => return Err(ApiError::new(StatusCode::CONFLICT, "ABORTED", "too much contention on these documents; retry")),
+            other => return other,
+        }
+    }
+    unreachable!()
+}
+
+async fn commit_once(state: &AppState, caller: &Caller, writes: Vec<Write>, transaction: Option<&str>) -> ApiResult<(i64, Vec<Option<Document>>)> {
     if writes.is_empty() {
         return Ok((micros_now(), vec![]));
     }
@@ -549,7 +575,7 @@ pub async fn commit(state: &AppState, caller: &Caller, writes: Vec<Write>, trans
             for read in tx.get_array("reads").cloned().unwrap_or_default().iter().filter_map(Bson::as_document) {
                 let path = read.get_str("path").unwrap_or_default();
                 let expected = read.get_i64("version").unwrap_or(-1);
-                let current = coll.find_one(doc! { "_id": path }).session(&mut session).await.map_err(ApiError::db)?.map(|d| d.get_i64("update_time").unwrap_or(0)).unwrap_or(-1);
+                let current = coll.find_one(doc! { "_id": path }).session(&mut session).await.map_err(tx_err)?.map(|d| d.get_i64("update_time").unwrap_or(0)).unwrap_or(-1);
                 if current != expected {
                     return Err(ApiError::new(StatusCode::CONFLICT, "ABORTED", format!("{path} changed during the transaction; retry")));
                 }
@@ -564,7 +590,7 @@ pub async fn commit(state: &AppState, caller: &Caller, writes: Vec<Write>, trans
             let (path, _, _) = document_path(&write.path)?;
             let before_data = match pending.get(&path) {
                 Some(state) => state.clone(),
-                None => coll.find_one(doc! { "_id": &path }).session(&mut session).await.map_err(ApiError::db)?.map(|d| {
+                None => coll.find_one(doc! { "_id": &path }).session(&mut session).await.map_err(tx_err)?.map(|d| {
                     let mut stored = d.get_document("data").cloned().unwrap_or_default();
                     stored.insert("__version", d.get_i64("update_time").unwrap_or(0));
                     stored
@@ -586,7 +612,7 @@ pub async fn commit(state: &AppState, caller: &Caller, writes: Vec<Write>, trans
         for p in &planned {
             match &p.after {
                 None => {
-                    coll.delete_one(doc! { "_id": &p.path }).session(&mut session).await.map_err(ApiError::db)?;
+                    coll.delete_one(doc! { "_id": &p.path }).session(&mut session).await.map_err(tx_err)?;
                 }
                 Some(data) => {
                     coll.update_one(
@@ -599,7 +625,7 @@ pub async fn commit(state: &AppState, caller: &Caller, writes: Vec<Write>, trans
                     .upsert(true)
                     .session(&mut session)
                     .await
-                    .map_err(ApiError::db)?;
+                    .map_err(tx_err)?;
                 }
             }
         }
@@ -610,9 +636,7 @@ pub async fn commit(state: &AppState, caller: &Caller, writes: Vec<Write>, trans
     match result {
         Ok((version, planned)) => {
             if use_tx {
-                session.commit_transaction().await.map_err(|e| {
-                    if e.contains_label(mongodb::error::TRANSIENT_TRANSACTION_ERROR) { ApiError::new(StatusCode::CONFLICT, "ABORTED", "concurrent write; retry") } else { ApiError::db(e) }
-                })?;
+                session.commit_transaction().await.map_err(tx_err)?;
             }
             if let Some(id) = transaction {
                 let _ = state.db.coll(TRANSACTIONS).delete_one(doc! { "_id": id }).await;

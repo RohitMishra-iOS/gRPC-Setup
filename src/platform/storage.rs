@@ -364,12 +364,23 @@ pub async fn resumable(State(state): State<AppState>, Path(session): Path<String
             return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "OBJECT_TOO_LARGE", "file exceeds the size limit"));
         }
         if !body.is_empty() {
-            state
+            let inserted = state
                 .db
                 .coll(CHUNKS)
                 .insert_one(doc! { "session": &session, "offset": offset, "data": Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: body.to_vec() }, "expires_at": record.get_datetime("expires_at").cloned().unwrap_or(DateTime::now()) })
                 .await
-                .map_err(|e| if crate::db::is_duplicate_key(&e) { ApiError::bad_request("INVALID_ARGUMENT", "chunk already received") } else { ApiError::db(e) })?;
+                .map_err(|e| if crate::db::is_duplicate_key(&e) { ApiError::new(StatusCode::CONFLICT, "CHUNK_ALREADY_RECEIVED", "chunk already received") } else { ApiError::db(e) });
+            if let Err(e) = inserted {
+                if e.status == StatusCode::CONFLICT {
+                    // A concurrent/duplicate request already stored this chunk: report the real
+                    // offset so the client resumes from there.
+                    let now = uploads.find_one(doc! { "_id": &session }).await.map_err(ApiError::db)?.and_then(|r| r.get_i64("received").ok()).unwrap_or(received);
+                    let mut response = status_response("active", now, json!({ "error": { "message": "chunk already received" } }));
+                    *response.status_mut() = StatusCode::BAD_REQUEST;
+                    return Ok(response);
+                }
+                return Err(e);
+            }
             uploads.update_one(doc! { "_id": &session }, doc! { "$inc": { "received": body.len() as i64 } }).await.map_err(ApiError::db)?;
         }
     }
