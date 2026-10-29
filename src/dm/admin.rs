@@ -33,6 +33,7 @@ use mongodb::bson::{self, doc, Bson, DateTime, Document};
 use serde::Deserialize;
 use serde_json::{json, Map, Value as Json};
 
+use super::admin_analytics as analytics;
 use super::apns::PushRequest;
 use super::conditions::EvalContext;
 use super::remote_config::{self, Template};
@@ -51,6 +52,19 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/crashlytics/issues/:issue_id", get(get_issue).patch(update_issue))
         .route("/stability/:app_id", get(stability))
         .route("/performance/:app_id", get(performance))
+        // Console views (admin_analytics.rs)
+        .route("/apps", get(analytics::apps))
+        .route("/analytics/:app_id/overview", get(analytics::overview))
+        .route("/analytics/:app_id/realtime", get(analytics::realtime))
+        .route("/analytics/:app_id/events", get(analytics::events))
+        .route("/analytics/:app_id/events/:name", get(analytics::event_detail))
+        .route("/analytics/:app_id/screens", get(analytics::screens))
+        .route("/analytics/:app_id/stream", get(analytics::stream))
+        .route("/analytics/:app_id/users/:installation_id", get(analytics::user_detail))
+        .route("/crashlytics/:app_id/trend", get(analytics::crashlytics_trend))
+        .route("/crashlytics/issues/:issue_id/trend", get(analytics::issue_trend))
+        .route("/crashlytics/reports/:report_id", get(analytics::report_detail))
+        .route("/messaging/:app_id/history", get(analytics::push_history))
         .layer(axum::middleware::from_fn_with_state(state, require_admin))
 }
 
@@ -71,21 +85,21 @@ async fn require_admin(State(state): State<AppState>, request: Request, next: Ne
 
 type ApiResult = Result<Response, Response>;
 
-fn error(status: StatusCode, message: &str) -> Response {
+pub(super) fn error(status: StatusCode, message: &str) -> Response {
     (status, AxumJson(json!({ "error": message }))).into_response()
 }
 
-fn db_error(err: impl std::fmt::Display) -> Response {
+pub(super) fn db_error(err: impl std::fmt::Display) -> Response {
     eprintln!("[Admin] database error: {err}");
     error(StatusCode::SERVICE_UNAVAILABLE, "database error")
 }
 
-fn ok(value: Json) -> ApiResult {
+pub(super) fn ok(value: Json) -> ApiResult {
     Ok((StatusCode::OK, AxumJson(value)).into_response())
 }
 
 /// BSON → relaxed JSON (dates as ISO strings, ints as numbers).
-fn to_json(document: Document) -> Json {
+pub(super) fn to_json(document: Document) -> Json {
     Bson::Document(document).into_relaxed_extjson()
 }
 
@@ -597,7 +611,7 @@ struct DaysQuery {
     days: Option<i64>,
 }
 
-fn since(days: Option<i64>) -> DateTime {
+pub(super) fn since(days: Option<i64>) -> DateTime {
     let days = days.unwrap_or(7).clamp(1, 365);
     DateTime::from_millis(DateTime::now().timestamp_millis() - days * 86_400_000)
 }
