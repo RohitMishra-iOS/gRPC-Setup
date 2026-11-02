@@ -58,24 +58,98 @@ fn err(reason: &str) -> ApiError {
 
 fn normalize_email(email: &str) -> Result<String, ApiError> {
     let email = email.trim().to_lowercase();
-    let valid = email.len() <= 254
-        && email.split_once('@').is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.'))
-        && !email.contains(char::is_whitespace);
-    if valid {
+    if crate::validate::is_email(&email) {
         Ok(email)
     } else {
         Err(err("INVALID_EMAIL"))
     }
 }
 
-fn check_password(password: &str) -> Result<(), ApiError> {
-    if password.chars().count() < 6 {
-        Err(ApiError::bad_request("WEAK_PASSWORD", "Password should be at least 6 characters"))
-    } else if password.len() > 4096 {
-        Err(ApiError::bad_request("WEAK_PASSWORD", "Password is too long"))
-    } else {
-        Ok(())
+/// The password policy (DM_AUTH_PASSWORD_MIN_LENGTH / DM_AUTH_PASSWORD_REQUIRE). Every unmet
+/// requirement is listed so the app can show them all at once.
+pub fn check_password(state: &AppState, password: &str) -> Result<(), ApiError> {
+    let p = &state.config.platform;
+    let mut missing = Vec::new();
+    if password.chars().count() < p.password_min_length {
+        missing.push(format!("at least {} characters", p.password_min_length));
     }
+    if password.len() > crate::validate::limits::PASSWORD_MAX {
+        return Err(ApiError::bad_request("WEAK_PASSWORD", "Password is too long"));
+    }
+    for class in &p.password_require {
+        let (ok, label) = match class.as_str() {
+            "upper" => (password.chars().any(char::is_uppercase), "an uppercase letter"),
+            "lower" => (password.chars().any(char::is_lowercase), "a lowercase letter"),
+            "digit" => (password.chars().any(|c| c.is_ascii_digit()), "a digit"),
+            "symbol" => (password.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace()), "a symbol"),
+            _ => (true, ""),
+        };
+        if !ok {
+            missing.push(label.to_string());
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("WEAK_PASSWORD", format!("Password must contain {}", missing.join(", ")))
+            .with_details(json!([{ "@type": "dm.PasswordPolicy", "requirements": missing }])))
+    }
+}
+
+/// Custom claims: a JSON object of at most 1000 bytes without the reserved JWT/Firebase names.
+pub fn validate_custom_claims(v: &mut crate::validate::V, field: &str, claims: &Map<String, Json>) {
+    const RESERVED: &[&str] = &["acr", "amr", "at_hash", "aud", "auth_time", "azp", "cnf", "c_hash", "exp", "firebase", "iat", "iss", "jti", "nbf", "nonce", "sub", "typ", "user_id", "app_id", "uid"];
+    let size = serde_json::to_string(claims).map(|s| s.len()).unwrap_or(usize::MAX);
+    v.check(size <= crate::validate::limits::CUSTOM_CLAIMS_BYTES, field, format!("must be at most {} bytes of JSON (got {size})", crate::validate::limits::CUSTOM_CLAIMS_BYTES));
+    for key in claims.keys() {
+        v.check(!RESERVED.contains(&key.as_str()), format!("{field}.{key}"), "is a reserved claim name");
+    }
+    v.json_depth(field, &Json::Object(claims.clone()), 10);
+}
+
+/// Field rules for every accounts/* request (sizes, formats, allowed values).
+fn validate_body(state: &AppState, action: &str, b: &Body) -> crate::validate::V {
+    use crate::validate::{limits, V};
+    let mut v = V::new();
+    v.check(b.email.len() <= limits::EMAIL, "email", format!("must be at most {} characters", limits::EMAIL));
+    v.check(b.password.len() <= limits::PASSWORD_MAX && b.new_password.len() <= limits::PASSWORD_MAX, "password", "is too long");
+    if let Some(name) = &b.display_name {
+        v.text("displayName", name, limits::DISPLAY_NAME);
+    }
+    if let Some(url) = b.photo_url.as_deref().filter(|u| !u.is_empty()) {
+        v.url("photoUrl", url, false);
+    }
+    for (field, value) in [("token", &b.token), ("idToken", &b.id_token), ("accessToken", &b.access_token)] {
+        v.check(value.len() <= limits::ID_TOKEN, field, "is too long");
+    }
+    v.text("nonce", &b.nonce, 256);
+    v.opt_id("oobCode", &b.oob_code, limits::ID);
+    if action == "signInWithIdp" {
+        v.one_of("providerId", &b.provider_id, &["google.com", "apple.com"]);
+    }
+    if action == "sendOobCode" {
+        v.one_of("requestType", &b.request_type, &["PASSWORD_RESET", "VERIFY_EMAIL", "EMAIL_SIGNIN"]);
+    }
+    if !b.continue_url.is_empty() {
+        // Like Firebase's authorized domains: email links may only lead back to your own sites.
+        if v.url("continueUrl", &b.continue_url, false) {
+            let host = crate::validate::url_host(&b.continue_url).unwrap_or_default();
+            let allowed = &state.config.platform.authorized_domains;
+            v.check(
+                allowed.iter().any(|d| host == *d || host.ends_with(&format!(".{d}"))),
+                "continueUrl",
+                format!("host '{host}' is not an authorized domain (DM_AUTH_AUTHORIZED_DOMAINS)"),
+            );
+        }
+    }
+    for attribute in &b.delete_attribute {
+        v.one_of("deleteAttribute", attribute, &["DISPLAY_NAME", "PHOTO_URL"]);
+    }
+    v.max_count("deleteProvider", b.delete_provider.len(), 10);
+    for provider in &b.delete_provider {
+        v.len("deleteProvider", provider, 1, 64);
+    }
+    v
 }
 
 fn hash_password(password: &str) -> String {
@@ -269,6 +343,7 @@ struct Body {
 pub async fn accounts(State(state): State<AppState>, Path(action): Path<String>, headers: HeaderMap, body: Bytes) -> ApiResult {
     let caller = caller(&state, &headers, None, "auth").await?;
     let body: Body = parse_json(&body)?;
+    validate_body(&state, &action, &body).into_api()?;
     match action.as_str() {
         "signUp" => sign_up(&state, &headers, body).await,
         "signInWithPassword" => sign_in_with_password(&state, body).await,
@@ -312,7 +387,7 @@ async fn sign_up(state: &AppState, headers: &HeaderMap, body: Body) -> ApiResult
     if let (Some(token), false) = (bearer(headers), body.email.is_empty()) {
         let (claims, _) = current_user(state, token).await?;
         let email = normalize_email(&body.email)?;
-        check_password(&body.password)?;
+        check_password(state, &body.password)?;
         if users.find_one(doc! { "email": &email, "_id": { "$ne": &claims.sub } }).await.map_err(ApiError::db)?.is_some() {
             return Err(err("EMAIL_EXISTS"));
         }
@@ -344,7 +419,7 @@ async fn sign_up(state: &AppState, headers: &HeaderMap, body: Body) -> ApiResult
             return Err(err("OPERATION_NOT_ALLOWED"));
         }
         let email = normalize_email(&body.email)?;
-        check_password(&body.password)?;
+        check_password(state, &body.password)?;
         user.insert("anonymous", false);
         user.insert("email", &email);
         user.insert("password_hash", hash_password(&body.password));
@@ -618,7 +693,7 @@ async fn update(state: &AppState, body: Body) -> ApiResult {
         if !recent && !user.get_bool("anonymous").unwrap_or(false) {
             return Err(err("CREDENTIAL_TOO_OLD_LOGIN_AGAIN"));
         }
-        check_password(&body.password)?;
+        check_password(state, &body.password)?;
         set.insert("password_hash", hash_password(&body.password));
         set.insert("password_updated_at", DateTime::now());
         set.insert("anonymous", false);
@@ -747,7 +822,7 @@ async fn reset_password(state: &AppState, body: Body) -> ApiResult {
             .ok_or_else(|| ApiError::bad_request("INVALID_OOB_CODE", "the action code is invalid, expired or already used"))?;
         return ok(json!({ "email": code.get_str("email").ok(), "requestType": "PASSWORD_RESET" }));
     }
-    check_password(&body.new_password)?;
+    check_password(state, &body.new_password)?;
     let code = take_oob(state, &body.oob_code, "PASSWORD_RESET").await?;
     let uid = code.get_str("uid").unwrap_or_default();
     state

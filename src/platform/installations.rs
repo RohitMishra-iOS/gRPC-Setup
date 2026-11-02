@@ -47,9 +47,16 @@ pub async fn register(State(state): State<AppState>, headers: HeaderMap, body: B
     } else {
         body.app_id
     };
-    if app_id.is_empty() {
-        return Err(ApiError::bad_request("INVALID_ARGUMENT", "app_id is required"));
+    let mut v = crate::validate::V::new();
+    v.id("app_id", &app_id, crate::validate::limits::ID);
+    if !body.platform.is_empty() {
+        v.one_of("platform", &body.platform, crate::validate::PLATFORMS);
     }
+    v.text("sdk_version", &body.sdk_version, 64);
+    if let Some(fid) = body.fid.as_deref().filter(|f| !f.is_empty()) {
+        v.check(tokens::valid_fid(fid), "fid", "must be 22 url-safe base64 characters starting with c, d, e or f");
+    }
+    v.into_api()?;
     if state.config.auth_enabled() {
         let key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("");
         if !state.config.key_allows(key, &app_id) {
@@ -84,6 +91,9 @@ pub async fn register(State(state): State<AppState>, headers: HeaderMap, body: B
 
 /// Checks `Authorization: FIS_v2 <refresh_token>` against the stored hash; returns the app id.
 async fn check_refresh(state: &AppState, fid: &str, headers: &HeaderMap) -> ApiResult<String> {
+    if !tokens::valid_fid(fid) {
+        return Err(ApiError::bad_request("INVALID_ARGUMENT", "the installation id in the path is not a valid FID"));
+    }
     let presented = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())

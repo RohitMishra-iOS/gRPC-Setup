@@ -42,6 +42,10 @@ pub fn sign(secret: &str, timestamp: i64, body: &[u8]) -> String {
 }
 
 pub async fn call(State(state): State<AppState>, Path(name): Path<String>, headers: HeaderMap, body: Bytes) -> ApiResult {
+    let mut v = crate::validate::V::new();
+    v.check(is_function_name(&name), "name", "must be 1-63 letters, digits, _ or -, starting with a letter");
+    v.check(body.len() <= crate::validate::limits::CALLABLE_BODY_BYTES, "body", "is larger than 10 MB");
+    v.into_api()?;
     let caller = caller(&state, &headers, None, "functions").await?;
     let function = state
         .db
@@ -60,6 +64,9 @@ pub async fn call(State(state): State<AppState>, Path(name): Path<String>, heade
     if !request.is_object() || request.get("data").is_none() {
         return Err(ApiError::bad_request("INVALID_ARGUMENT", "body must be {\"data\": …}"));
     }
+    let mut v = crate::validate::V::new();
+    v.json_depth("data", &request["data"], crate::validate::limits::JSON_DEPTH);
+    v.into_api()?;
     let url = function.get_str("url").map_err(|_| ApiError::db("function has no url"))?.to_string();
     let timeout = function.get_i64("timeout_seconds").or_else(|_| function.get_i32("timeout_seconds").map(i64::from)).unwrap_or(60).clamp(1, 540);
 
@@ -156,4 +163,11 @@ mod tests {
         assert_eq!(a, super::sign("s3cret", 1700000000, b"{\"data\":1}"));
         assert_ne!(a, super::sign("other", 1700000000, b"{\"data\":1}"));
     }
+}
+
+/// Callable names: a letter, then letters, digits, _ or - (1-63 characters).
+pub fn is_function_name(name: &str) -> bool {
+    name.len() <= crate::validate::limits::FUNCTION_NAME
+        && name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }

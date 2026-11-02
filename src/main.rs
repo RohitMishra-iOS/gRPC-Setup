@@ -23,6 +23,7 @@ mod platform;
 mod proxy;
 #[cfg(test)]
 mod tests;
+mod validate;
 
 pub mod pb {
     tonic::include_proto!("status");
@@ -114,6 +115,18 @@ async fn run() -> Result<(), BoxError> {
     let grpc_port = env_port(&["GRPC_PORT"], 50051)?;
     let grpc_host = env_nonempty("GRPC_HOST").unwrap_or_else(|| "0.0.0.0".into());
     let config = Config::from_env();
+    let mut fatal = false;
+    for (is_fatal, problem) in config.problems() {
+        if is_fatal {
+            eprintln!("❌  Config: {problem}");
+            fatal = true;
+        } else {
+            println!("⚠️  Config: {problem}");
+        }
+    }
+    if fatal {
+        return Err("invalid configuration (see the messages above)".into());
+    }
 
     let db = Db::connect(config.retention_days, config.analytics_retention_days).await?;
     log_config(&config);

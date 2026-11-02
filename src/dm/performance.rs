@@ -21,7 +21,13 @@ pub async fn upload_performance(state: &AppState, meta: &RequestMeta, request: U
     let documents: Vec<Document> = request
         .records
         .iter()
-        .filter(|r| !r.id.is_empty())
+        .filter(|r| {
+            let problems = validate_record(r);
+            if !problems.is_ok() {
+                eprintln!("[Performance] dropped record '{}': {}", r.name, problems.summary());
+            }
+            problems.is_ok()
+        })
         .map(|r| record_document(&context, r))
         .collect();
     if documents.is_empty() {
@@ -33,6 +39,44 @@ pub async fn upload_performance(state: &AppState, meta: &RequestMeta, request: U
         Err(err) if only_duplicates(&err) => Ok(Ack {}), // some/all were already stored by a retry
         Err(err) => Err(unavailable(err)),
     }
+}
+
+/// Firebase Performance rules for one record (invalid records are dropped, not the batch).
+pub fn validate_record(r: &PerfRecord) -> crate::validate::V {
+    use crate::validate::{limits, V};
+    let mut v = V::new();
+    v.id("id", &r.id, limits::ID);
+    let kind = PerfKind::try_from(r.kind).unwrap_or(PerfKind::Unspecified);
+    v.check(kind != PerfKind::Unspecified, "kind", "must be a known PerfKind");
+    v.len("name", &r.name, 1, limits::TRACE_NAME * 2);
+    if kind == PerfKind::Trace {
+        // Custom trace names: no leading underscore (reserved for automatic traces), no
+        // leading/trailing whitespace, ≤ 100 characters.
+        v.check(!r.name.starts_with('_') && r.name.trim() == r.name && r.name.chars().count() <= limits::TRACE_NAME, "name", "custom trace names must be ≤ 100 characters, without a leading underscore or surrounding spaces");
+    }
+    v.range("duration_us", r.duration_us, 0, limits::TRACE_MAX_DURATION_US);
+    let now = chrono::Utc::now().timestamp_millis();
+    v.check(r.start_time_ms > now - 30 * 86_400_000 && r.start_time_ms < now + 86_400_000, "start_time_ms", "must be within the last 30 days");
+    v.max_count("counters", r.counters.len(), limits::TRACE_METRICS);
+    for k in r.counters.keys() {
+        v.len(&format!("counters.{k}"), k, 1, limits::TRACE_NAME);
+    }
+    // Automatic traces carry a few SDK attributes on top of the 5 custom ones.
+    v.max_count("attributes", r.attributes.len(), limits::TRACE_ATTRIBUTES + 5);
+    for (k, val) in &r.attributes {
+        v.check(!k.is_empty() && k.chars().count() <= limits::ATTRIBUTE_NAME && val.chars().count() <= limits::ATTRIBUTE_VALUE, format!("attributes.{k}"), format!("names ≤ {} and values ≤ {} characters", limits::ATTRIBUTE_NAME, limits::ATTRIBUTE_VALUE));
+    }
+    if kind == PerfKind::NetworkRequest {
+        v.url("request_url", &r.request_url, false);
+        if !r.http_method.is_empty() {
+            v.one_of("http_method", &r.http_method.to_uppercase(), &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"]);
+        }
+        v.range("response_code", i64::from(r.response_code), 0, 599);
+        v.check(r.request_payload_bytes >= 0 && r.response_payload_bytes >= 0, "payload_bytes", "must not be negative");
+        v.text("response_content_type", &r.response_content_type, 256);
+    }
+    v.check(r.metric_kit_json.len() <= limits::METRIC_KIT_JSON, "metric_kit_json", "is too large");
+    v
 }
 
 /// True if an unordered insert_many failed only because some ids already existed.

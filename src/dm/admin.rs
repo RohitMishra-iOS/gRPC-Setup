@@ -358,7 +358,67 @@ fn default_ttl() -> u64 {
     24 * 3600
 }
 
+/// Push request rules: target formats, notification text sizes (APNs/FCM limits), data payload
+/// size (4 KB like FCM), TTL (≤ 28 days), ids.
+fn validate_send(r: &SendRequest) -> crate::validate::V {
+    use crate::validate::{is_topic, limits, V};
+    let mut v = V::new();
+    v.id("app_id", &r.app_id, limits::ID);
+    match &r.target {
+        Target::RegistrationToken(t) => {
+            v.check(super::messaging::is_registration_token(t), "target.registration_token", "is not a registration token (dm1_…)");
+        }
+        Target::InstallationId(id) => {
+            v.id("target.installation_id", id, limits::ID);
+        }
+        Target::UserId(id) => {
+            v.len("target.user_id", id, 1, limits::USER_ID);
+        }
+        Target::Topic(t) => {
+            v.check(is_topic(t), "target.topic", "must be 1-900 characters of a-z A-Z 0-9 - _ . ~ %");
+        }
+        Target::All(_) => {}
+    }
+    if let Some(n) = &r.notification {
+        v.check(n.title.as_deref().is_some_and(|t| !t.trim().is_empty()) || n.body.as_deref().is_some_and(|b| !b.trim().is_empty()), "notification", "needs a title or a body (omit notification for a silent push)");
+        for (field, value, max) in [("notification.title", &n.title, 256), ("notification.subtitle", &n.subtitle, 256), ("notification.body", &n.body, 2048), ("notification.sound", &n.sound, 256), ("notification.category", &n.category, 64), ("notification.thread_id", &n.thread_id, 64)] {
+            if let Some(text) = value {
+                v.multiline(field, text, max * 4);
+                v.check(text.chars().count() <= max, field, format!("must be at most {max} characters"));
+            }
+        }
+        if let Some(badge) = n.badge {
+            v.range("notification.badge", badge, 0, 99_999);
+        }
+        if let Some(url) = n.image_url.as_deref().filter(|u| !u.is_empty()) {
+            v.url("notification.image_url", url, true);
+        }
+    }
+    v.json_size("data", &Json::Object(r.data.clone()), limits::MESSAGE_DATA_BYTES);
+    for key in r.data.keys() {
+        v.check(!["aps", "dm", "from", "notification", "message_type"].contains(&key.as_str()) && !key.starts_with("google.") && !key.starts_with("gcm."), format!("data.{key}"), "is a reserved key");
+    }
+    for (field, value) in [("campaign_id", &r.campaign_id), ("label", &r.label)] {
+        if let Some(text) = value {
+            v.opt_id(field, text, limits::ID);
+        }
+    }
+    if let Some(name) = &r.campaign_name {
+        v.text("campaign_name", name, 256);
+    }
+    if let Some(collapse) = &r.collapse_id {
+        v.check(collapse.len() <= 64 && !collapse.chars().any(char::is_control), "collapse_id", "must be at most 64 bytes (APNs limit)");
+    }
+    v.check(r.ttl_seconds <= 28 * 86_400, "ttl_seconds", "must be at most 2419200 (28 days)");
+    v
+}
+
 async fn send(State(state): State<AppState>, AxumJson(request): AxumJson<SendRequest>) -> ApiResult {
+    let problems = validate_send(&request);
+    if !problems.is_ok() {
+        let violations: Vec<Json> = problems.violations.iter().map(|x| json!({ "field": x.field, "description": x.description })).collect();
+        return Err((StatusCode::BAD_REQUEST, AxumJson(json!({ "error": problems.summary(), "violations": violations }))).into_response());
+    }
     if matches!(request.target, Target::All(false)) {
         return Err(error(StatusCode::BAD_REQUEST, "target {\"all\": false} matches nobody — use {\"all\": true} to send to every device"));
     }

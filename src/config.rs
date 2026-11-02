@@ -43,6 +43,10 @@ pub struct Config {
     pub dsym_cache_dir: std::path::PathBuf,
     /// Platform services (Installations, App Check, Auth, Storage, Functions, Database).
     pub platform: PlatformConfig,
+    /// Reject /events and CheckStatus batches without a valid API key (DM_EVENTS_REQUIRE_API_KEY).
+    /// Off by default so 1.x iOS builds (which send no key) keep working; a key that *is* sent is
+    /// always checked against the batch's app_id.
+    pub events_require_api_key: bool,
 }
 
 /// Settings for the /v1 platform services. See README "Platform services".
@@ -80,6 +84,13 @@ pub struct PlatformConfig {
     /// HMAC secret sent to callable-function endpoints (X-DM-Signature).
     pub functions_secret: Option<String>,
     pub storage_max_bytes: usize,
+    /// Password policy: minimum length (DM_AUTH_PASSWORD_MIN_LENGTH, 6–128, default 6) and
+    /// required character classes (DM_AUTH_PASSWORD_REQUIRE: any of upper,lower,digit,symbol).
+    pub password_min_length: usize,
+    pub password_require: Vec<String>,
+    /// Hosts allowed in continueUrl of email actions (DM_AUTH_AUTHORIZED_DOMAINS), like Firebase's
+    /// authorized domains. Default: localhost + the host of DM_AUTH_ACTION_URL.
+    pub authorized_domains: Vec<String>,
 }
 
 impl Config {
@@ -116,7 +127,62 @@ impl Config {
                 .map(Into::into)
                 .unwrap_or_else(|| std::env::temp_dir().join("dm-dsym-cache")),
             platform: PlatformConfig::from_env(),
+            events_require_api_key: env_nonempty("DM_EVENTS_REQUIRE_API_KEY").is_some_and(|v| v == "true" || v == "1"),
         }
+    }
+
+    /// Configuration problems: (fatal, message). Fatal ones stop the server at startup.
+    pub fn problems(&self) -> Vec<(bool, String)> {
+        let mut out = Vec::new();
+        for (app, key) in &self.api_keys {
+            if let Some(app) = app {
+                if !crate::validate::is_safe_id(app) || app.len() > crate::validate::limits::ID {
+                    out.push((true, format!("DM_API_KEYS: app id '{app}' must be 1-128 characters of A-Z a-z 0-9 . _ : -")));
+                }
+            }
+            if key.len() < 16 {
+                out.push((false, format!("DM_API_KEYS: the key for '{}' is shorter than 16 characters — use a long random key", app.as_deref().unwrap_or("*"))));
+            }
+        }
+        if let Some(admin) = &self.admin_key {
+            if admin.len() < 16 {
+                out.push((false, "DM_ADMIN_KEY is shorter than 16 characters — use a long random key".into()));
+            }
+        }
+        let secret = &self.platform.token_secret;
+        if !self.platform.token_secret_is_random && secret.len() < 16 {
+            out.push((true, "DM_TOKEN_SECRET must be at least 16 characters (32+ random characters recommended)".into()));
+        } else if !self.platform.token_secret_is_random && secret.len() < 32 {
+            out.push((false, "DM_TOKEN_SECRET is shorter than 32 characters".into()));
+        }
+        for (name, value) in [("DM_ALERT_WEBHOOK_URL", &self.alert_webhook_url), ("DM_AUTH_EMAIL_WEBHOOK", &self.platform.auth_email_webhook), ("DM_AUTH_ACTION_URL", &self.platform.auth_action_url)] {
+            if let Some(url) = value {
+                if !crate::validate::is_url(url, false) {
+                    out.push((true, format!("{name} must be an http(s) URL")));
+                }
+            }
+        }
+        if self.allowed_origins != "*" {
+            for origin in self.allowed_origins.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+                if !crate::validate::is_url(origin, false) {
+                    out.push((true, format!("ALLOWED_ORIGINS: '{origin}' must be an origin like https://console.dmart.in or *")));
+                }
+            }
+        }
+        for product in &self.platform.appcheck_enforce {
+            if !["auth", "storage", "functions", "database", "rpc", "all"].contains(&product.as_str()) {
+                out.push((true, format!("DM_APPCHECK_ENFORCE: unknown product '{product}' (auth, storage, functions, database, rpc, all)")));
+            }
+        }
+        for class in &self.platform.password_require {
+            if !["upper", "lower", "digit", "symbol"].contains(&class.as_str()) {
+                out.push((true, format!("DM_AUTH_PASSWORD_REQUIRE: unknown class '{class}' (upper, lower, digit, symbol)")));
+            }
+        }
+        if self.rc_fetches_per_hour == 0 {
+            out.push((false, "DM_RC_FETCHES_PER_HOUR is 0 — every app fetch will be throttled".into()));
+        }
+        out
     }
 
     fn apns_from_env() -> Option<ApnsConfig> {
@@ -185,7 +251,19 @@ impl PlatformConfig {
             auth_email_webhook: env_nonempty("DM_AUTH_EMAIL_WEBHOOK"),
             auth_action_url: env_nonempty("DM_AUTH_ACTION_URL"),
             functions_secret: env_nonempty("DM_FUNCTIONS_SECRET"),
-            storage_max_bytes: parse_env::<usize>("DM_STORAGE_MAX_MB", 100) * 1024 * 1024,
+            storage_max_bytes: parse_env::<usize>("DM_STORAGE_MAX_MB", 100).clamp(1, 5 * 1024) * 1024 * 1024,
+            password_min_length: parse_env("DM_AUTH_PASSWORD_MIN_LENGTH", 6usize).clamp(6, 128),
+            password_require: list("DM_AUTH_PASSWORD_REQUIRE").into_iter().map(|s| s.to_lowercase()).collect(),
+            authorized_domains: {
+                let mut domains: Vec<String> = list("DM_AUTH_AUTHORIZED_DOMAINS").into_iter().map(|d| d.to_lowercase()).collect();
+                if domains.is_empty() {
+                    domains.push("localhost".into());
+                    if let Some(host) = env_nonempty("DM_AUTH_ACTION_URL").and_then(|u| crate::validate::url_host(&u)) {
+                        domains.push(host);
+                    }
+                }
+                domains
+            },
         }
     }
 

@@ -64,6 +64,38 @@ async fn cors(State(state): State<AppState>, request: Request, next: Next) -> Re
     response
 }
 
+/// API key check for analytics batches: a key that is sent (x-api-key, or Authorization: Bearer
+/// from the iOS HTTP transport) must be valid for the batch's app; no key is accepted unless
+/// DM_EVENTS_REQUIRE_API_KEY is set.
+fn events_key_check(state: &AppState, headers: &HeaderMap, app_id: &str) -> Result<(), String> {
+    if !state.config.auth_enabled() {
+        return Ok(());
+    }
+    let key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")))
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    match key {
+        Some(key) if state.config.key_allows(key, app_id) => Ok(()),
+        Some(_) => Err(format!("invalid API key for app '{app_id}'")),
+        None if state.config.events_require_api_key => Err("x-api-key is required".into()),
+        None => Ok(()),
+    }
+}
+
+/// Decompresses a gzip body, refusing to inflate past `max` bytes (zip bombs).
+fn gunzip(body: &[u8], max: usize) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(body).take(max as u64 + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    if out.len() > max {
+        return Err(format!("decompressed body is larger than {max} bytes"));
+    }
+    Ok(out)
+}
+
 async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     let url = uri.path_and_query().map_or("/", |p| p.as_str());
 
@@ -78,8 +110,26 @@ async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri,
     }
 
     // ── Analytics events batch ──────────────────────────────────────────────
-    if url == "/events" {
-        let (code, payload) = events::process_events_json(&state.db, &String::from_utf8_lossy(&body)).await;
+    if url == "/events" || url.starts_with("/events?") {
+        // The iOS HTTP transport gzips the body.
+        let gzipped = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("gzip"));
+        let raw = if gzipped {
+            match gunzip(&body, MAX_BODY_BYTES) {
+                Ok(bytes) => bytes,
+                Err(err) => return json_response(StatusCode::BAD_REQUEST, json!({ "status_code": 400, "accepted": false, "error": "Invalid gzip body", "details": [err] })),
+            }
+        } else {
+            body.to_vec()
+        };
+        let text = String::from_utf8_lossy(&raw);
+        let app_id = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|b| b.get("app_id").and_then(|a| a.as_str()).filter(|a| !a.is_empty()).map(str::to_string))
+            .or_else(|| headers.get("x-dm-app-id").and_then(|v| v.to_str().ok()).map(str::to_string));
+        if let Err(message) = events_key_check(&state, &headers, app_id.as_deref().unwrap_or("")) {
+            return json_response(StatusCode::UNAUTHORIZED, json!({ "status_code": 401, "accepted": false, "error": message }));
+        }
+        let (code, payload) = events::process_events_json(&state.db, &text).await;
         if code == 200 {
             println!("[Events] ✓ batch_id={} events={}", events::batch_id_label(&payload), events::events_len(&payload));
         }
@@ -89,6 +139,18 @@ async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri,
 
     println!("[Proxy] {method} {url}");
     let meta = RequestMeta::from_headers(&headers);
+    if uri.path() == "/status.StatusService/CheckStatus" && body.len() >= 5 {
+        // Same API key rule as /events (the batch's app_id is inside the Struct).
+        let declared = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+        let app_id = StatusRequest::decode(&body[5..(5 + declared).min(body.len())])
+            .ok()
+            .and_then(|r| r.message.map(|m| grpc::struct_to_json(&m)))
+            .and_then(|j| j.get("app_id").and_then(|a| a.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        if let Err(message) = events_key_check(&state, &headers, &app_id) {
+            return grpc_error_response(Status::unauthenticated(message));
+        }
+    }
     handle_grpc_web(&state, &meta, uri.path(), &body).await
 }
 
@@ -151,7 +213,15 @@ async fn handle_grpc_web(state: &AppState, meta: &RequestMeta, path: &str, body:
     } else {
         dispatch(state, meta, path, message).await
     };
+    grpc_web_response(outcome)
+}
 
+fn grpc_error_response(status: Status) -> Response {
+    grpc_web_response(Err(status))
+}
+
+/// Frames a unary result (message + trailers, or trailers only) as a gRPC-Web response.
+fn grpc_web_response(outcome: Result<Vec<u8>, Status>) -> Response {
     let (data, trailers) = match outcome {
         Ok(bytes) => (frame(0x00, &bytes), "grpc-status:0\r\ngrpc-message:\r\n".to_string()),
         Err(status) => {

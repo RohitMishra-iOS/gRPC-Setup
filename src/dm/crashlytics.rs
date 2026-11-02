@@ -30,9 +30,54 @@ pub async fn upload_crash_reports(state: &AppState, meta: &RequestMeta, request:
         return Err(Status::invalid_argument(format!("at most {MAX_REPORTS_PER_CALL} reports per call")));
     }
     for report in request.reports {
+        // An invalid report is dropped (and logged) rather than failing the call: the client
+        // deletes what it sent on success, so one bad report can't block the others forever.
+        let problems = validate_report(&report);
+        if !problems.is_ok() {
+            eprintln!("[Crashlytics] dropped report {}: {}", report.id, problems.summary());
+            continue;
+        }
         ingest(state, &context, report).await?;
     }
     Ok(Ack {})
+}
+
+/// Size and format rules for one crash report (see crate::validate::limits).
+pub fn validate_report(r: &CrashReport) -> crate::validate::V {
+    use crate::validate::{limits, V};
+    let mut v = V::new();
+    v.id("id", &r.id, limits::ID);
+    v.check(CrashKind::try_from(r.kind).is_ok_and(|k| k != CrashKind::Unspecified), "kind", "must be a known CrashKind");
+    if r.timestamp_ms != 0 {
+        let now = chrono::Utc::now().timestamp_millis();
+        v.check(r.timestamp_ms > now - 365 * 86_400_000 && r.timestamp_ms < now + 86_400_000, "timestamp_ms", "must be within the last year (and not in the future)");
+    }
+    v.text("launch_id", &r.launch_id, limits::ID);
+    for (field, value) in [("app_version", &r.app_version), ("app_build", &r.app_build), ("os_version", &r.os_version), ("device_model", &r.device_model), ("bundle_id", &r.bundle_id), ("signal_name", &r.signal_name)] {
+        v.text(field, value, limits::SHORT_TEXT);
+    }
+    v.text("user_id", &r.user_id, limits::USER_ID);
+    v.max_count("custom_keys", r.custom_keys.len(), limits::CRASH_KEYS);
+    for (k, val) in &r.custom_keys {
+        v.check(!k.is_empty() && k.len() <= limits::CRASH_KEY_LENGTH && val.len() <= limits::CRASH_KEY_LENGTH, format!("custom_keys.{k}"), format!("keys and values must be at most {} bytes", limits::CRASH_KEY_LENGTH));
+    }
+    let log_bytes: usize = r.logs.iter().map(String::len).sum();
+    v.check(log_bytes <= limits::CRASH_LOG_BYTES * 2, "logs", format!("must total at most {} bytes", limits::CRASH_LOG_BYTES * 2));
+    v.max_count("breadcrumbs", r.breadcrumbs.len(), limits::CRASH_BREADCRUMBS);
+    v.check(r.exception_name.len() <= 1024, "exception_name", "must be at most 1024 bytes");
+    v.check(r.exception_reason.len() <= limits::CRASH_REASON, "exception_reason", format!("must be at most {} bytes", limits::CRASH_REASON));
+    v.max_count("error_user_info", r.error_user_info.len(), limits::CRASH_KEYS);
+    v.max_count("return_addresses", r.return_addresses.len(), limits::CRASH_FRAMES);
+    v.max_count("frames", r.frames.len(), limits::CRASH_FRAMES);
+    for (i, f) in r.frames.iter().enumerate() {
+        v.check(f.symbol.len() <= 4096 && f.file.len() <= 1024 && f.library.len() <= 1024 && f.line >= 0, format!("frames[{i}]"), "symbol ≤ 4096 bytes, file/library ≤ 1024 bytes, line ≥ 0");
+    }
+    v.max_count("binary_images", r.binary_images.len(), limits::CRASH_IMAGES);
+    for (i, image) in r.binary_images.iter().enumerate() {
+        v.check(image.name.len() <= 1024 && image.uuid.len() <= 64, format!("binary_images[{i}]"), "name ≤ 1024 bytes, uuid ≤ 64");
+    }
+    v.check(r.metric_kit_json.len() <= limits::METRIC_KIT_JSON, "metric_kit_json", format!("must be at most {} bytes", limits::METRIC_KIT_JSON));
+    v
 }
 
 pub fn kind_name(kind: CrashKind) -> &'static str {

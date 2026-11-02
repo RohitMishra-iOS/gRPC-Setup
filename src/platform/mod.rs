@@ -111,11 +111,17 @@ pub struct ApiError {
     /// Machine-readable reason, e.g. "EMAIL_EXISTS", "PERMISSION_DENIED".
     pub reason: String,
     pub message: String,
+    /// Structured details, e.g. BadRequest field violations from crate::validate.
+    pub details: Option<Json>,
 }
 
 impl ApiError {
     pub fn new(status: StatusCode, reason: &str, message: impl Into<String>) -> Self {
-        Self { status, reason: reason.to_string(), message: message.into() }
+        Self { status, reason: reason.to_string(), message: message.into(), details: None }
+    }
+    pub fn with_details(mut self, details: Json) -> Self {
+        self.details = Some(details);
+        self
     }
     pub fn bad_request(reason: &str, message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, reason, message)
@@ -152,12 +158,15 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = json!({ "error": {
+        let mut body = json!({ "error": {
             "code": self.status.as_u16(),
             "status": self.status_name(),
             "message": if self.message.is_empty() { self.reason.clone() } else { format!("{}: {}", self.reason, self.message) },
             "reason": self.reason,
         }});
+        if let Some(details) = self.details {
+            body["error"]["details"] = details;
+        }
         (self.status, AxumJson(body)).into_response()
     }
 }

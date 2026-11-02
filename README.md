@@ -459,7 +459,7 @@ Default (no rules saved): signed-in users can read and write everything. Express
 `/admin/functions…` — see `src/platform/admin.rs`.
 
 **Testing:** start a MongoDB replica set locally, run the server with `tests/e2e.env`, then
-`python3 tests/e2e_platform.py` (75 end-to-end checks) and `python3 tests/e2e_webpush.py` (Web Push decrypted by the RFC 8291 reference implementation).
+`python3 tests/e2e_platform.py` (75 end-to-end checks), `python3 tests/e2e_validation.py` (49 input-validation checks) and `python3 tests/e2e_webpush.py` (Web Push decrypted by the RFC 8291 reference implementation).
 
 ## Running in Development
 
@@ -486,3 +486,47 @@ docker run --env-file .env -p 8080:8080 grpc-status-server
 |--------|----------------|----------------------------------|
 | `50051`| gRPC (HTTP/2)  | Android, iOS                     |
 | `8080` | HTTP/1.1 (CORS)| React (web), React Native (web)  |
+
+## Input validation
+
+Every endpoint validates its input before touching the database (`src/validate.rs`; all limits
+are in `validate::limits` and match Firebase's where Firebase has one). A rejected request gets
+HTTP 400 `INVALID_ARGUMENT` with one entry per bad field:
+
+```json
+{"error": {"code": 400, "status": "INVALID_ARGUMENT", "reason": "INVALID_ARGUMENT",
+  "message": "INVALID_ARGUMENT: displayName must be at most 256 characters (got 300)",
+  "details": [{"@type": "type.googleapis.com/google.rpc.BadRequest",
+               "fieldViolations": [{"field": "displayName", "description": "must be at most 256 characters (got 300)"}]}]}}
+```
+
+Admin endpoints answer `{"error": "<summary>", "violations": [{field, description}]}`; gRPC calls
+answer `INVALID_ARGUMENT` with the same summary.
+
+Queued client data is never thrown away for one bad item:
+
+| Upload | Invalid item | Response |
+|---|---|---|
+| Analytics batch | event: dropped; parameter / user property / consent entry: removed | 200, `rejected_events` + `warnings` |
+| Crash reports | report dropped (logged) | Ack |
+| Performance records | record dropped (logged) | Ack |
+
+The main rules:
+
+| Area | Rules |
+|---|---|
+| Analytics | ≤ 500 events/batch; event + parameter names `^[A-Za-z][A-Za-z0-9_]*$` ≤ 40; ≤ 25 custom parameters; strings ≤ 500; items ≤ 200 × 27 params; user properties ≤ 24/36 chars; timestamps within 30 days back / 1 day ahead; consent `granted`/`denied`; gzip bodies; API key checked when sent (required with `DM_EVENTS_REQUIRE_API_KEY`) |
+| Client context (all RPCs) | ids `[A-Za-z0-9._:-]` ≤ 128; known `platform` and `network_type`; text fields ≤ 256 |
+| Crashlytics | ≤ 64 keys (≤ 1 KB each), logs ≤ 128 KB, ≤ 1024 frames, known kind, sane timestamps |
+| Performance | Firebase trace rules (no leading `_` for custom traces, ≤ 100 chars), ≤ 32 metrics, ≤ 5 (+SDK) attributes, duration 0–24 h, valid URL/method/status for network records |
+| Remote Config | ≤ 100 custom signals (key ≤ 250, value ≤ 500); template ≤ 3000 parameters, ≤ 2000 conditions, ≤ 1 MB, keys `^[A-Za-z_][A-Za-z0-9_]*$` |
+| Messaging | topic `[a-zA-Z0-9-_.~%]{1,900}`, ≤ 2000 topics/device, APNs token hex, Web Push keys 65/16 bytes, registration tokens `dm1_…`; sends: title ≤ 256, body ≤ 2048, data ≤ 4 KB without reserved keys, TTL ≤ 28 days, https image URLs |
+| Installations / App Check | FID format, known platform, provider-specific required fields, Android package names |
+| Auth | email format; password policy (`DM_AUTH_PASSWORD_MIN_LENGTH`, `DM_AUTH_PASSWORD_REQUIRE`); displayName ≤ 256; photoUrl http(s); continueUrl only on `DM_AUTH_AUTHORIZED_DOMAINS`; custom claims ≤ 1000 bytes without reserved names |
+| Storage | object names 1–1024 bytes, no control chars / `.` / `..` / empty segments; bucket names; MIME types; custom metadata ≤ 8 KB of strings; list `maxResults` 1–1000 |
+| Functions | names `^[A-Za-z][A-Za-z0-9_-]{0,62}$`; body ≤ 10 MB, depth ≤ 64; admin: http(s) URL, timeout 1–540 s |
+| Database | paths ≤ 6 KB, segments ≤ 1500 bytes; field names; nesting ≤ 20; document ≤ 1 MiB; ≤ 500 writes; query `limit` 1–10000, `limitToLast` needs `orderBy`, ≤ 32 orderBy, ≤ 100 filters, ≤ 30 `in` values, ≤ 5 aggregations |
+
+Startup checks the configuration too: malformed URLs, unknown `DM_APPCHECK_ENFORCE` products or
+password classes, and a `DM_TOKEN_SECRET` under 16 characters stop the server; short API/admin
+keys only print a warning.

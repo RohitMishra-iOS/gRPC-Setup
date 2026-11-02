@@ -184,6 +184,29 @@ fn value_text_map<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, St
 impl Template {
     /// Rejects templates that would misbehave at fetch time.
     pub fn validate(&self) -> Result<(), String> {
+        // Firebase Remote Config limits.
+        if self.parameters.len() > 3000 {
+            return Err(format!("at most 3000 parameters (got {})", self.parameters.len()));
+        }
+        if self.conditions.len() > 2000 {
+            return Err(format!("at most 2000 conditions (got {})", self.conditions.len()));
+        }
+        let size = serde_json::to_vec(self).map(|v| v.len()).unwrap_or(0);
+        if size > 1024 * 1024 {
+            return Err(format!("the template must be at most 1 MB (got {size} bytes)"));
+        }
+        for key in self.parameters.keys() {
+            let mut chars = key.chars();
+            let valid = key.len() <= 256 && chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                return Err(format!("invalid parameter key '{key}': start with a letter or _, then letters, digits or _ (≤ 256)"));
+            }
+        }
+        for condition in &self.conditions {
+            if condition.name.chars().count() > 100 || condition.name.chars().any(char::is_control) {
+                return Err(format!("condition name '{}' must be at most 100 characters", condition.name));
+            }
+        }
         let mut names = std::collections::HashSet::new();
         for condition in &self.conditions {
             if condition.name.is_empty() || !names.insert(condition.name.as_str()) {
@@ -536,9 +559,25 @@ impl RcState {
 
 // ── RPC ──────────────────────────────────────────────────────────────────────
 
+/// Targeting inputs: Firebase's custom-signal limits, user properties, language/country codes.
+fn validate_fetch(r: &FetchConfigRequest) -> crate::validate::V {
+    use crate::validate::{limits, V};
+    let mut v = V::new();
+    v.max_count("user_properties", r.user_properties.len(), limits::USER_PROPERTIES * 2);
+    for (k, val) in &r.user_properties {
+        v.check(k.len() <= 40 && val.chars().count() <= limits::USER_PROPERTY_VALUE * 4, format!("user_properties.{k}"), "is too long");
+    }
+    v.string_map("custom_signals", &r.custom_signals, limits::CUSTOM_SIGNALS, limits::CUSTOM_SIGNAL_KEY, limits::CUSTOM_SIGNAL_VALUE);
+    v.check(r.last_template_version >= 0, "last_template_version", "must not be negative");
+    v.check(r.language_code.len() <= 35 && r.language_code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'), "language_code", "must be a BCP-47 tag like en-IN");
+    v.check(r.country_code.is_empty() || (r.country_code.len() <= 3 && r.country_code.chars().all(|c| c.is_ascii_alphanumeric())), "country_code", "must be a region code like IN");
+    v
+}
+
 pub async fn fetch_config(state: &AppState, meta: &RequestMeta, request: FetchConfigRequest) -> Result<FetchConfigResponse, Status> {
     let context = require_context(request.context.clone(), meta)?;
     authorize(&state.config, meta, &context.app_id)?;
+    validate_fetch(&request).into_status()?;
 
     let limit = if request.is_realtime_check { state.config.rc_realtime_checks_per_hour } else { state.config.rc_fetches_per_hour };
     if let Err(retry_after) = state.rc.admit(&context.installation_id, request.is_realtime_check, limit) {
