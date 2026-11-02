@@ -179,6 +179,22 @@ check("admin send: notification without title or body → 400", r.status_code ==
 r = requests.put(B + f"/admin/remote-config/{APP}", json={"parameters": {"show-banner": {"default_value": "true"}}}, headers=ADMIN)
 check("admin remote config: parameter keys follow Firebase rules", r.status_code == 400 and "show-banner" in r.text, r.text)
 
+# ── Admin: security rules / user fields ──────────────────────────────────────
+r = requests.put(B + "/admin/rules/database", json={"rules": [{"match": "a/{rest=**}/b", "read": "true"}, {"match": "x/{id}"}, {"match": "y/{id}", "write": "auth.uid =="}]}, headers=ADMIN)
+fields = {v["field"] for v in r.json().get("violations", [])} if r.status_code == 400 else set()
+check("admin rules: every bad rule reported (wildcard position, no ops, bad expression)", {"rules[0].match", "rules[1]", "rules[2].write"} <= fields, r.text)
+r = requests.post(B + "/admin/rules/storage/test", json={"rules": [{"match": "{p=**}", "read": "true"}], "op": "get", "path": "", "resource": [1]}, headers=ADMIN)
+fields = {v["field"] for v in r.json().get("violations", [])} if r.status_code == 400 else set()
+check("admin rules test: empty path and non-object resource → 400", {"path", "resource"} <= fields, r.text)
+r = requests.post(B + "/admin/auth/users", json={"email": f"clear-{RUN}@example.com", "password": "secret123", "displayName": "Temp", "photoUrl": "https://example.com/p.png"}, headers=ADMIN)
+uid = r.json()["user"]["localId"] if r.ok else ""
+r = requests.patch(B + f"/admin/auth/users/{uid}", json={"displayName": "", "photoUrl": ""}, headers=ADMIN)
+user = r.json().get("user", {}) if r.ok else {}
+check("admin users: empty display name / photo URL clears them", r.ok and user.get("displayName") is None and user.get("photoUrl") is None, r.text)
+r = requests.patch(B + f"/admin/auth/users/{uid}", json={"photoUrl": "javascript:alert(1)"}, headers=ADMIN)
+check("admin users: non-http photo URL → 400", r.status_code == 400 and any(v["field"] == "photoUrl" for v in r.json().get("violations", [])), r.text)
+requests.delete(B + f"/admin/auth/users/{uid}", headers=ADMIN)
+
 passed = sum(ok for _, ok in results)
 print(f"\n{passed}/{len(results)} passed")
 raise SystemExit(0 if passed == len(results) else 1)

@@ -83,6 +83,14 @@ fn validate_user(state: &AppState, b: &UserBody) -> crate::validate::V {
     v
 }
 
+fn rule_violations(list: &[rules::Rule]) -> crate::validate::V {
+    let mut v = crate::validate::V::new();
+    for (field, description) in rules::violations(list) {
+        v.fail(&field, description);
+    }
+    v
+}
+
 fn body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Response> {
     let bytes: &[u8] = if bytes.is_empty() { b"{}" } else { bytes };
     serde_json::from_slice(bytes).map_err(|e| fail(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))
@@ -242,14 +250,21 @@ async fn update_user(State(state): State<AppState>, Path(uid): Path<String>, pay
     if let Some(v) = b.email_verified {
         set.insert("email_verified", v);
     }
-    if let Some(v) = b.display_name {
-        set.insert("display_name", v);
+    // An empty display name / photo URL clears it (as deleteAttribute does on the client API).
+    let mut unset = doc! {};
+    for (key, value) in [("display_name", &b.display_name), ("photo_url", &b.photo_url)] {
+        match value.as_deref() {
+            Some("") => {
+                unset.insert(key, "");
+            }
+            Some(v) => {
+                set.insert(key, v);
+            }
+            None => {}
+        }
     }
-    if let Some(v) = b.photo_url {
-        set.insert("photo_url", v);
-    }
-    if let Some(v) = b.email {
-        set.insert("email", v.trim().to_lowercase());
+    if let Some(v) = b.email.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        set.insert("email", v.to_lowercase());
     }
     if let Some(v) = b.password {
         set.insert("password_hash", hash(&v));
@@ -258,13 +273,20 @@ async fn update_user(State(state): State<AppState>, Path(uid): Path<String>, pay
     if let Some(claims) = b.custom_claims {
         set.insert("custom_claims", bson::to_document(&claims).unwrap_or_default());
     }
-    if set.is_empty() {
+    if set.is_empty() && unset.is_empty() {
         return Err(fail(StatusCode::BAD_REQUEST, "nothing to update"));
+    }
+    let mut update = doc! {};
+    if !set.is_empty() {
+        update.insert("$set", set);
+    }
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
     }
     let updated = state
         .db
         .coll(auth::USERS)
-        .find_one_and_update(doc! { "_id": &uid }, doc! { "$set": set })
+        .find_one_and_update(doc! { "_id": &uid }, update)
         .return_document(mongodb::options::ReturnDocument::After)
         .await
         .map_err(|e| if crate::db::is_duplicate_key(&e) { fail(StatusCode::CONFLICT, "email already in use") } else { db_fail(e) })?
@@ -519,7 +541,12 @@ async fn put_rules(State(state): State<AppState>, Path(kind): Path<String>, payl
     let kind = rules_kind(&kind)?;
     let b: Json = body(&payload)?;
     let parsed: Vec<rules::Rule> = serde_json::from_value(b["rules"].clone()).map_err(|e| fail(StatusCode::BAD_REQUEST, format!("rules: {e}")))?;
-    rules::validate(&parsed).map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    checked(rule_violations(&parsed))?;
+    if let Some(by) = b["by"].as_str() {
+        let mut v = crate::validate::V::new();
+        v.text("by", by, 100);
+        checked(v)?;
+    }
     let as_bson = bson::to_bson(&serde_json::to_value(&parsed).unwrap_or_default()).unwrap_or(Bson::Null);
     state
         .db
@@ -539,7 +566,16 @@ async fn test_rules(State(state): State<AppState>, Path(kind): Path<String>, pay
         Some(r) if r.is_array() => serde_json::from_value(r.clone()).map_err(|e| fail(StatusCode::BAD_REQUEST, format!("rules: {e}")))?,
         _ => storage::load_rules(&state, kind).await,
     };
-    rules::validate(&rules).map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    let mut v = rule_violations(&rules);
+    let path = b["path"].as_str().unwrap_or_default();
+    v.check(!path.trim_matches('/').is_empty() && path.len() <= 6 * 1024 && !path.chars().any(char::is_control), "path", "required, at most 6 KB, no control characters");
+    if let Some(uid) = b["auth"].get("uid").filter(|u| !u.is_null()) {
+        v.check(uid.as_str().is_some_and(|u| !u.is_empty() && u.len() <= crate::validate::limits::UID), "auth.uid", "must be a non-empty string");
+    }
+    for key in ["resource", "request"] {
+        v.check(b.get(key).map_or(true, |x| x.is_null() || x.is_object()), key, "must be a JSON object");
+    }
+    checked(v)?;
     let op = match b["op"].as_str().unwrap_or("get") {
         "get" => Op::Get,
         "list" => Op::List,
@@ -548,7 +584,6 @@ async fn test_rules(State(state): State<AppState>, Path(kind): Path<String>, pay
         "delete" => Op::Delete,
         other => return Err(fail(StatusCode::BAD_REQUEST, format!("unknown op {other}"))),
     };
-    let path = b["path"].as_str().unwrap_or_default();
     let auth = match b["auth"].as_object() {
         Some(a) => json!({ "uid": a.get("uid"), "token": a.get("token").cloned().unwrap_or(json!({})) }),
         None => Json::Null,

@@ -153,18 +153,71 @@ pub fn check(rules: &[Rule], path: &str, op: Op, context: &Json) -> Result<(), S
 }
 
 /// Validates every expression in a rule set (used when saving rules).
-pub fn validate(rules: &[Rule]) -> Result<(), String> {
-    for rule in rules {
-        if rule.pattern.trim().is_empty() {
-            return Err("every rule needs a match pattern".into());
+pub const MAX_RULES: usize = 500;
+pub const MAX_EXPRESSION: usize = 4096;
+pub const MAX_PATTERN: usize = 1024;
+
+/// Every problem in a rule set, as (field, description) pairs for a 400 response.
+pub fn violations(rules: &[Rule]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if rules.len() > MAX_RULES {
+        out.push(("rules".to_string(), format!("at most {MAX_RULES} rules")));
+    }
+    for (i, rule) in rules.iter().enumerate() {
+        let field = format!("rules[{i}]");
+        let pattern = rule.pattern.trim();
+        if pattern.is_empty() {
+            out.push((format!("{field}.match"), "required path pattern, e.g. users/{uid}/{rest=**}".into()));
+        } else if pattern.len() > MAX_PATTERN {
+            out.push((format!("{field}.match"), format!("at most {MAX_PATTERN} bytes")));
+        } else {
+            let segments: Vec<&str> = pattern.trim_matches('/').split('/').collect();
+            let mut names = std::collections::HashSet::new();
+            for (j, segment) in segments.iter().enumerate() {
+                if segment.is_empty() || segment.chars().any(char::is_control) {
+                    out.push((format!("{field}.match"), "empty segment or control character".into()));
+                    break;
+                }
+                if segment.starts_with('{') || segment.ends_with('}') {
+                    let inner = segment.trim_start_matches('{').trim_end_matches('}');
+                    let (name, wildcard) = match inner.strip_suffix("=**") {
+                        Some(n) => (n, true),
+                        None => (inner, false),
+                    };
+                    let valid = segment.starts_with('{')
+                        && segment.ends_with('}')
+                        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if !valid {
+                        out.push((format!("{field}.match"), format!("bad variable segment \"{segment}\"")));
+                    } else if !names.insert(name.to_string()) {
+                        out.push((format!("{field}.match"), format!("variable \"{name}\" is used twice")));
+                    }
+                    if wildcard && j != segments.len() - 1 {
+                        out.push((format!("{field}.match"), "{name=**} is only allowed as the last segment".into()));
+                    }
+                } else if segment.contains('{') || segment.contains('}') || segment.contains('*') {
+                    out.push((format!("{field}.match"), format!("bad segment \"{segment}\"")));
+                }
+            }
         }
-        for (name, expr) in [("read", &rule.read), ("write", &rule.write), ("get", &rule.get), ("list", &rule.list), ("create", &rule.create), ("update", &rule.update), ("delete", &rule.delete)] {
+        let ops = [("read", &rule.read), ("write", &rule.write), ("get", &rule.get), ("list", &rule.list), ("create", &rule.create), ("update", &rule.update), ("delete", &rule.delete)];
+        if ops.iter().all(|(_, e)| e.is_none()) {
+            out.push((field.clone(), "grants nothing: add read, write, get, list, create, update or delete".into()));
+        }
+        for (name, expr) in ops {
             if let Some(expr) = expr {
-                parse(expr).map_err(|e| format!("{} → {name}: {e}", rule.pattern))?;
+                if expr.trim().is_empty() {
+                    out.push((format!("{field}.{name}"), "empty expression (use \"false\" to deny)".into()));
+                } else if expr.len() > MAX_EXPRESSION {
+                    out.push((format!("{field}.{name}"), format!("at most {MAX_EXPRESSION} characters")));
+                } else if let Err(e) = parse(expr) {
+                    out.push((format!("{field}.{name}"), e));
+                }
             }
         }
     }
-    Ok(())
+    out
 }
 
 // ── Expression language ──────────────────────────────────────────────────────
@@ -555,6 +608,23 @@ pub fn auth_value(user: Option<&super::tokens::IdClaims>) -> Json {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rule_set_violations() {
+        let rule = |pattern: &str, read: Option<&str>| Rule { pattern: pattern.into(), read: read.map(Into::into), write: None, get: None, list: None, create: None, update: None, delete: None };
+        assert!(super::violations(&[rule("users/{uid}/{rest=**}", Some("auth.uid == uid"))]).is_empty());
+        let bad = super::violations(&[
+            rule("", Some("true")),
+            rule("a/{rest=**}/b", Some("true")),
+            rule("a/{x}/{x}", Some("true")),
+            rule("a/{1bad}", Some("true")),
+            rule("a/b", None),
+            rule("a/b", Some("auth.uid ==")),
+            rule("a/b", Some("  ")),
+        ]);
+        let fields: Vec<&str> = bad.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(fields, ["rules[0].match", "rules[1].match", "rules[2].match", "rules[3].match", "rules[4]", "rules[5].read", "rules[6].read"]);
+    }
+
     use super::*;
 
     fn ctx(uid: Option<&str>) -> Json {
@@ -601,7 +671,7 @@ mod tests {
             { "match": "posts/{id}", "read": "true", "create": "auth != null && request.resource.data.author == auth.uid" }
         ]))
         .unwrap();
-        validate(&rules).unwrap();
+        assert!(violations(&rules).is_empty());
         assert!(check(&rules, "users/u1/photo.png", Op::Get, &ctx(Some("u1"))).is_ok());
         assert!(check(&rules, "users/u2/photo.png", Op::Get, &ctx(Some("u1"))).is_err());
         assert!(check(&rules, "posts/1", Op::Get, &ctx(None)).is_ok());
@@ -610,6 +680,6 @@ mod tests {
         assert!(check(&rules, "posts/1", Op::Delete, &ctx(Some("u1"))).is_err(), "no delete rule");
         assert!(check(&rules, "other/1", Op::Get, &ctx(Some("u1"))).is_err(), "no match");
         let bad: Vec<Rule> = serde_json::from_value(json!([{ "match": "x", "read": "auth.uid ==" }])).unwrap();
-        assert!(validate(&bad).is_err());
+        assert!(!violations(&bad).is_empty());
     }
 }
