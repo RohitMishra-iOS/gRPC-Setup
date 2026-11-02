@@ -526,6 +526,8 @@ The main rules:
 | Storage | object names 1–1024 bytes, no control chars / `.` / `..` / empty segments; bucket names; MIME types; custom metadata ≤ 8 KB of strings; list `maxResults` 1–1000 |
 | Functions | names `^[A-Za-z][A-Za-z0-9_-]{0,62}$`; body ≤ 10 MB, depth ≤ 64; admin: http(s) URL, timeout 1–540 s |
 | Database | paths ≤ 6 KB, segments ≤ 1500 bytes; field names; nesting ≤ 20; document ≤ 1 MiB; ≤ 500 writes; query `limit` 1–10000, `limitToLast` needs `orderBy`, ≤ 32 orderBy, ≤ 100 filters, ≤ 30 `in` values, ≤ 5 aggregations |
+| Security rules (admin) | ≤ 500 rules; `match` ≤ 1024 bytes with `{name}` / `{name=**}` (last segment only, no duplicate names); each rule grants at least one operation; expressions ≤ 4096 chars and must parse; the rules playground also checks path, `auth.uid` and object-typed `resource` / `request` |
+| Users (admin) | same rules as the client API; an empty `displayName` / `photoUrl` clears it |
 
 Startup checks the configuration too: malformed URLs, unknown `DM_APPCHECK_ENFORCE` products or
 password classes, and a `DM_TOKEN_SECRET` under 16 characters stop the server; short API/admin
