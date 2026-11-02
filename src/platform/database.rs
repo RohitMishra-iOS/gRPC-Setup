@@ -99,13 +99,18 @@ fn segments(path: &str) -> Vec<&str> {
 }
 
 fn valid_segment(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 1500 && s != "." && s != ".." && !(s.starts_with("__") && s.ends_with("__")) && !s.contains('\0')
+    !s.is_empty()
+        && s.len() <= crate::validate::limits::SEGMENT_BYTES
+        && s != "."
+        && s != ".."
+        && !(s.starts_with("__") && s.ends_with("__"))
+        && !s.chars().any(char::is_control)
 }
 
 /// "users/u1" → ("users", "users", "u1"). Document paths have an even number of segments.
 pub fn document_path(path: &str) -> ApiResult<(String, String, String)> {
     let segs = segments(path);
-    if segs.is_empty() || segs.len() % 2 != 0 || !segs.iter().all(|s| valid_segment(s)) {
+    if path.len() > crate::validate::limits::PATH_BYTES || segs.len() > 100 || segs.is_empty() || segs.len() % 2 != 0 || !segs.iter().all(|s| valid_segment(s)) {
         return Err(ApiError::bad_request("INVALID_ARGUMENT", format!("'{path}' is not a document path (collection/doc[/collection/doc…])")));
     }
     let collection = segs[..segs.len() - 1].join("/");
@@ -114,7 +119,7 @@ pub fn document_path(path: &str) -> ApiResult<(String, String, String)> {
 
 pub fn collection_path(path: &str) -> ApiResult<String> {
     let segs = segments(path);
-    if segs.is_empty() || segs.len() % 2 != 1 || !segs.iter().all(|s| valid_segment(s)) {
+    if path.len() > crate::validate::limits::PATH_BYTES || segs.len() > 100 || segs.is_empty() || segs.len() % 2 != 1 || !segs.iter().all(|s| valid_segment(s)) {
         return Err(ApiError::bad_request("INVALID_ARGUMENT", format!("'{path}' is not a collection path")));
     }
     Ok(segs.join("/"))
@@ -130,11 +135,24 @@ pub fn auto_id() -> String {
 // ── JSON ⇄ BSON values ───────────────────────────────────────────────────────
 
 fn valid_key(key: &str) -> bool {
-    !key.is_empty() && !key.contains('.') && !key.starts_with('$') && !(key.starts_with("__") && key != "__type")
+    !key.is_empty()
+        && key.len() <= crate::validate::limits::FIELD_NAME_BYTES
+        && !key.contains('.')
+        && !key.starts_with('$')
+        && !(key.starts_with("__") && key != "__type")
+        && !key.chars().any(char::is_control)
 }
 
 /// JSON → BSON (typed values decoded). Transforms must already have been extracted.
 pub fn to_bson(value: &Json) -> Result<Bson, String> {
+    if crate::validate::depth(value) > crate::validate::limits::NESTING_DEPTH {
+        return Err(format!("values may be nested at most {} levels deep", crate::validate::limits::NESTING_DEPTH));
+    }
+    to_bson_inner(value)
+}
+
+fn to_bson_inner(value: &Json) -> Result<Bson, String> {
+    let to_bson = to_bson_inner;
     Ok(match value {
         Json::Null => Bson::Null,
         Json::Bool(b) => Bson::Boolean(*b),
@@ -859,7 +877,50 @@ fn cursor_doc(order: &[(String, bool)], values: &[Json], after: bool, inclusive:
 }
 
 /// Runs a query (no rules) and returns stored documents in order.
+/// Firestore query limits: orderBy count/direction, limit ranges, cursor shape, filter count.
+pub fn validate_query(q: &Query) -> crate::validate::V {
+    use crate::validate::{limits, V};
+    let mut v = V::new();
+    v.max_count("orderBy", q.order_by.len(), limits::ORDER_BY);
+    for (i, o) in q.order_by.iter().enumerate() {
+        if let Some(d) = &o.direction {
+            v.one_of(&format!("orderBy[{i}].direction"), d, &["asc", "desc", "ASCENDING", "DESCENDING"]);
+        }
+    }
+    if let Some(limit) = q.limit {
+        v.range("limit", limit, 1, limits::QUERY_LIMIT);
+    }
+    if let Some(limit) = q.limit_to_last {
+        v.range("limitToLast", limit, 1, limits::QUERY_LIMIT);
+        v.check(q.limit.is_none(), "limitToLast", "can't be combined with limit");
+        v.check(!q.order_by.is_empty(), "limitToLast", "needs at least one orderBy");
+    }
+    v.check(q.start_at.is_none() || q.start_after.is_none(), "startAt", "use either startAt or startAfter");
+    v.check(q.end_at.is_none() || q.end_before.is_none(), "endAt", "use either endAt or endBefore");
+    for (name, cursor) in [("startAt", &q.start_at), ("startAfter", &q.start_after), ("endAt", &q.end_at), ("endBefore", &q.end_before)] {
+        if let Some(values) = cursor {
+            v.check(!values.is_empty() && values.len() <= q.order_by.len() + 1, name, "needs 1 to (number of orderBy + 1) values");
+        }
+    }
+    fn count(filter: &Json) -> usize {
+        match (filter.get("and").or_else(|| filter.get("or"))).and_then(Json::as_array) {
+            Some(parts) => parts.iter().map(count).sum(),
+            None => 1,
+        }
+    }
+    if let Some(filter) = &q.filter {
+        v.check(filter.is_object(), "where", "must be an object");
+        v.max_count("where", count(filter), limits::FILTERS);
+        v.json_depth("where", filter, limits::NESTING_DEPTH + 4);
+    }
+    if let Some(select) = &q.select {
+        v.max_count("select", select.len(), 100);
+    }
+    v
+}
+
 pub async fn run_query(state: &AppState, query: &Query) -> ApiResult<Vec<Document>> {
+    validate_query(query).into_api()?;
     let mut filter = match (&query.collection, &query.collection_group) {
         (Some(c), None) => doc! { "collection": collection_path(c)? },
         (None, Some(g)) if valid_segment(g) => doc! { "collection_id": g },
@@ -958,6 +1019,26 @@ async fn aggregate_route(State(state): State<AppState>, headers: HeaderMap, body
     let body: Json = super::parse_json(&body)?;
     let mut query: Query = serde_json::from_value(body.get("query").cloned().unwrap_or_default()).map_err(|e| ApiError::bad_request("INVALID_ARGUMENT", e.to_string()))?;
     query.limit = Some(query.limit.unwrap_or(10_000));
+    {
+        let mut v = crate::validate::V::new();
+        let aggs = body.get("aggregations");
+        v.check(aggs.map_or(true, |a| a.is_array()), "aggregations", "must be an array");
+        let list = aggs.and_then(Json::as_array).cloned().unwrap_or_default();
+        v.check(!list.is_empty() || aggs.is_none(), "aggregations", "must not be empty");
+        v.max_count("aggregations", list.len(), crate::validate::limits::AGGREGATIONS);
+        let mut aliases = std::collections::HashSet::new();
+        for (i, agg) in list.iter().enumerate() {
+            let alias = agg["alias"].as_str().unwrap_or("");
+            v.check(crate::validate::is_analytics_name(alias, 1500), format!("aggregations[{i}].alias"), "must be a letter followed by letters, digits or _");
+            v.check(aliases.insert(alias.to_string()), format!("aggregations[{i}].alias"), "is used twice");
+            let op = agg["op"].as_str().unwrap_or("");
+            if v.one_of(&format!("aggregations[{i}].op"), op, &["count", "sum", "avg"]) && op != "count" {
+                let field = agg["field"].as_str().unwrap_or("");
+                v.check(!field.is_empty() && field.split('.').all(valid_key), format!("aggregations[{i}].field"), "sum/avg need a valid field path");
+            }
+        }
+        v.into_api()?;
+    }
     let docs = query_documents(&state, &caller, &query).await?;
     let mut result = Map::new();
     for agg in body.get("aggregations").and_then(Json::as_array).cloned().unwrap_or_else(|| vec![json!({ "alias": "count", "op": "count" })]) {

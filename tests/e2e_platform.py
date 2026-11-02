@@ -59,7 +59,7 @@ fis = inst["auth_token"]["token"]
 r = post("/v1/appcheck/exchange", {"app_id": APP, "provider": "debug", "token": "DEBUG-TOKEN-1234567890"})
 check("appcheck: debug exchange", r.ok and r.json()["ttl_seconds"] >= 1800, r.text)
 appcheck = r.json()["token"]
-r = post("/v1/appcheck/exchange", {"app_id": APP, "provider": "debug", "token": "nope"})
+r = post("/v1/appcheck/exchange", {"app_id": APP, "provider": "debug", "token": "NOT-A-REGISTERED-TOKEN-0000"})
 check("appcheck: unknown debug token rejected", r.status_code == 403, r.text)
 r = requests.post(f"{B}/admin/appcheck/debug-tokens", json={"name": "Rohit's iPhone"}, headers=ADMIN)
 console_token = r.json()["token"]
@@ -69,7 +69,7 @@ check("appcheck: console-registered debug token + limited use", r.ok and limited
 r1 = requests.post(f"{B}/v1/appcheck/verify", json={"token": limited}).json()
 r2 = requests.post(f"{B}/v1/appcheck/verify", json={"token": limited}).json()
 check("appcheck: limited-use token consumed once", r1["already_consumed"] is False and r2["already_consumed"] is True, (r1, r2))
-r = post("/v1/appcheck/exchange", {"app_id": APP, "provider": "devicecheck", "token": "x"})
+r = post("/v1/appcheck/exchange", {"app_id": APP, "provider": "devicecheck", "token": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="})
 check("appcheck: devicecheck without key → clear 501", r.status_code == 501 and "DeviceCheck" in r.text, r.text)
 r = requests.post(f"{B}/admin/appcheck/{APP}/token", json={}, headers=ADMIN)
 check("appcheck: admin mints custom-provider token", r.ok and requests.post(f"{B}/v1/appcheck/verify", json={"token": r.json()["token"]}).json()["provider"] == "custom", r.text)

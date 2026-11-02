@@ -127,7 +127,36 @@ pub fn require_context(context: Option<ClientContext>, meta: &RequestMeta) -> Re
     if context.installation_id.is_empty() {
         return Err(Status::invalid_argument("context.installation_id is required"));
     }
+    validate_context(&context).into_status()?;
     Ok(context)
+}
+
+/// Field rules for ClientContext (every dm.sdk.v1 call).
+pub fn validate_context(c: &ClientContext) -> crate::validate::V {
+    use crate::validate::{limits, PLATFORMS, V};
+    let mut v = V::new();
+    v.opt_id("context.app_id", &c.app_id, limits::ID);
+    v.id("context.installation_id", &c.installation_id, limits::ID);
+    v.text("context.user_id", &c.user_id, limits::USER_ID);
+    if !c.platform.is_empty() {
+        v.one_of("context.platform", &c.platform, PLATFORMS);
+    }
+    for (field, value) in [
+        ("context.sdk_version", &c.sdk_version),
+        ("context.bundle_id", &c.bundle_id),
+        ("context.app_version", &c.app_version),
+        ("context.app_build", &c.app_build),
+        ("context.os_version", &c.os_version),
+        ("context.device_model", &c.device_model),
+    ] {
+        v.text(field, value, limits::SHORT_TEXT);
+    }
+    v.text("context.locale", &c.locale, 35);
+    v.text("context.timezone", &c.timezone, 64);
+    if !c.network_type.is_empty() {
+        v.one_of("context.network_type", &c.network_type, &["wifi", "cellular", "ethernet", "other", "none", "unknown"]);
+    }
+    v
 }
 
 /// Context → embedded document (the device/app snapshot stored with every record).

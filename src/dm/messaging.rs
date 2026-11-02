@@ -45,6 +45,11 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
             if !(sub.endpoint.starts_with("https://") || (insecure_ok && sub.endpoint.starts_with("http://"))) || sub.p256dh.is_empty() || sub.auth.is_empty() {
                 return Err(Status::invalid_argument("web_push needs an https endpoint, p256dh and auth"));
             }
+            let mut v = crate::validate::V::new();
+            v.url("web_push.endpoint", &sub.endpoint, !insecure_ok);
+            v.base64("web_push.p256dh", &sub.p256dh, Some(65)); // uncompressed P-256 point
+            v.base64("web_push.auth", &sub.auth, Some(16));
+            v.into_status()?;
             ("web_push.endpoint", sub.endpoint.clone(), doc! { "web_push": { "endpoint": &sub.endpoint, "p256dh": &sub.p256dh, "auth": &sub.auth } })
         }
         other => return Err(Status::invalid_argument(format!("unknown push_transport '{other}' (apns, fcm, webpush)"))),
@@ -52,6 +57,15 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
     if let Some(bad) = request.topics.iter().find(|t| !is_valid_topic(t)) {
         return Err(Status::invalid_argument(format!("invalid topic '{bad}'")));
     }
+    let mut v = crate::validate::V::new();
+    v.max_count("topics", request.topics.len(), crate::validate::limits::TOPICS_PER_DEVICE);
+    if !request.notification_authorization.is_empty() {
+        v.one_of("notification_authorization", &request.notification_authorization, &["authorized", "denied", "notDetermined", "provisional", "ephemeral"]);
+    }
+    if !request.previous_registration_token.is_empty() {
+        v.check(is_registration_token(&request.previous_registration_token), "previous_registration_token", "is not a registration token");
+    }
+    v.into_status()?;
 
     // Two attempts: a concurrent first registration of the same install can lose the unique
     // (app_id, installation_id) race; the retry then finds and reuses the winner's token.
@@ -156,6 +170,9 @@ pub async fn update_topic_subscription(state: &AppState, meta: &RequestMeta, req
     if !is_valid_topic(&request.topic) {
         return Err(Status::invalid_argument(format!("invalid topic '{}'", request.topic)));
     }
+    if !is_registration_token(&request.registration_token) {
+        return Err(Status::invalid_argument("registration_token is not a registration token"));
+    }
     let update = if request.subscribe {
         doc! { "$addToSet": { "topics": &request.topic }, "$set": { "updated_at": DateTime::now() } }
     } else {
@@ -176,6 +193,9 @@ pub async fn update_topic_subscription(state: &AppState, meta: &RequestMeta, req
 pub async fn unregister_device(state: &AppState, meta: &RequestMeta, request: UnregisterDeviceRequest) -> Result<Ack, Status> {
     let context = require_context(request.context, meta)?;
     authorize(&state.config, meta, &context.app_id)?;
+    if !is_registration_token(&request.registration_token) {
+        return Err(Status::invalid_argument("registration_token is not a registration token"));
+    }
     // Idempotent: unknown tokens are fine.
     state
         .db
@@ -198,4 +218,9 @@ pub fn is_valid_topic(topic: &str) -> bool {
 
 fn is_valid_apns_token(token: &str) -> bool {
     (32..=200).contains(&token.len()) && token.len() % 2 == 0 && token.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Tokens this server issues: "dm1_" + 64 hex characters.
+pub fn is_registration_token(token: &str) -> bool {
+    token.strip_prefix("dm1_").is_some_and(|hex| hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()))
 }

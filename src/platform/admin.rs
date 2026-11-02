@@ -46,6 +46,43 @@ fn db_fail(e: impl std::fmt::Display) -> Response {
 fn done(value: Json) -> AdminResult {
     Ok(AxumJson(value).into_response())
 }
+/// Validation failures in the admin error shape: {"error": "<summary>", "violations": [{field, description}]}.
+fn checked(v: crate::validate::V) -> Result<(), Response> {
+    if v.is_ok() {
+        return Ok(());
+    }
+    let violations: Vec<Json> = v.violations.iter().map(|x| json!({ "field": x.field, "description": x.description })).collect();
+    Err((StatusCode::BAD_REQUEST, AxumJson(json!({ "error": v.summary(), "violations": violations }))).into_response())
+}
+
+/// Admin-side user fields: the same rules the client-facing auth API applies.
+fn validate_user(state: &AppState, b: &UserBody) -> crate::validate::V {
+    use crate::validate::{limits, V};
+    let mut v = V::new();
+    if let Some(uid) = b.uid.as_deref().filter(|u| !u.is_empty()) {
+        v.len("uid", uid, 1, limits::UID);
+        v.check(!uid.contains('/'), "uid", "must not contain '/'");
+    }
+    if let Some(email) = b.email.as_deref().filter(|e| !e.is_empty()) {
+        v.email("email", &email.trim().to_lowercase());
+    }
+    if let Some(password) = b.password.as_deref() {
+        if let Err(e) = auth::check_password(state, password) {
+            v.fail("password", e.message);
+        }
+    }
+    if let Some(name) = &b.display_name {
+        v.text("displayName", name, limits::DISPLAY_NAME);
+    }
+    if let Some(url) = b.photo_url.as_deref().filter(|u| !u.is_empty()) {
+        v.url("photoUrl", url, false);
+    }
+    if let Some(claims) = &b.custom_claims {
+        auth::validate_custom_claims(&mut v, "customClaims", claims);
+    }
+    v
+}
+
 fn body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Response> {
     let bytes: &[u8] = if bytes.is_empty() { b"{}" } else { bytes };
     serde_json::from_slice(bytes).map_err(|e| fail(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))
@@ -173,17 +210,15 @@ fn hash(password: &str) -> String {
 
 async fn create_user(State(state): State<AppState>, payload: Bytes) -> AdminResult {
     let b: UserBody = body(&payload)?;
+    checked(validate_user(&state, &b))?;
     let uid = b.uid.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| tokens::random_token().chars().filter(|c| c.is_ascii_alphanumeric()).take(28).collect());
     let now = DateTime::now();
     let mut user = doc! { "_id": &uid, "created_at": now, "disabled": b.disabled.unwrap_or(false), "email_verified": b.email_verified.unwrap_or(false), "anonymous": false, "providers": [], "custom_claims": bson::to_document(&b.custom_claims.clone().unwrap_or_default()).unwrap_or_default(), "tokens_valid_after": 0_i64 };
-    if let Some(email) = b.email.as_deref().map(|e| e.trim().to_lowercase()).filter(|e| e.contains('@')) {
+    if let Some(email) = b.email.as_deref().map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()) {
         user.insert("email", &email);
         user.insert("providers", vec![Bson::Document(doc! { "provider_id": "password", "raw_id": &email, "email": &email })]);
     }
     if let Some(password) = b.password.as_deref() {
-        if password.len() < 6 {
-            return Err(fail(StatusCode::BAD_REQUEST, "password must be at least 6 characters"));
-        }
         user.insert("password_hash", hash(password));
         user.insert("password_updated_at", now);
     }
@@ -199,6 +234,7 @@ async fn create_user(State(state): State<AppState>, payload: Bytes) -> AdminResu
 
 async fn update_user(State(state): State<AppState>, Path(uid): Path<String>, payload: Bytes) -> AdminResult {
     let b: UserBody = body(&payload)?;
+    checked(validate_user(&state, &b))?;
     let mut set = doc! {};
     if let Some(v) = b.disabled {
         set.insert("disabled", v);
@@ -216,16 +252,10 @@ async fn update_user(State(state): State<AppState>, Path(uid): Path<String>, pay
         set.insert("email", v.trim().to_lowercase());
     }
     if let Some(v) = b.password {
-        if v.len() < 6 {
-            return Err(fail(StatusCode::BAD_REQUEST, "password must be at least 6 characters"));
-        }
         set.insert("password_hash", hash(&v));
         set.insert("password_updated_at", DateTime::now());
     }
     if let Some(claims) = b.custom_claims {
-        if serde_json::to_string(&claims).map(|s| s.len()).unwrap_or(0) > 1000 {
-            return Err(fail(StatusCode::BAD_REQUEST, "custom claims must be under 1000 bytes"));
-        }
         set.insert("custom_claims", bson::to_document(&claims).unwrap_or_default());
     }
     if set.is_empty() {
@@ -262,6 +292,13 @@ async fn custom_token(State(state): State<AppState>, payload: Bytes) -> AdminRes
     let b: Json = body(&payload)?;
     let uid = b["uid"].as_str().filter(|u| !u.is_empty() && u.len() <= 128).ok_or_else(|| fail(StatusCode::BAD_REQUEST, "uid (1–128 chars) is required"))?;
     let claims = b["claims"].as_object().cloned().unwrap_or_default();
+    let mut v = crate::validate::V::new();
+    v.len("uid", uid, 1, crate::validate::limits::UID);
+    if !b["claims"].is_null() && !b["claims"].is_object() {
+        v.fail("claims", "must be an object");
+    }
+    auth::validate_custom_claims(&mut v, "claims", &claims);
+    checked(v)?;
     done(json!({ "token": auth::mint_custom_token(&state, uid, claims), "expires_in": 3600 }))
 }
 
@@ -269,6 +306,13 @@ async fn email_link(State(state): State<AppState>, payload: Bytes) -> AdminResul
     let b: Json = body(&payload)?;
     let kind = b["type"].as_str().unwrap_or("PASSWORD_RESET");
     let email = b["email"].as_str().unwrap_or_default().trim().to_lowercase();
+    let mut v = crate::validate::V::new();
+    v.one_of("type", kind, &["PASSWORD_RESET", "VERIFY_EMAIL", "EMAIL_SIGNIN"]);
+    v.email("email", &email);
+    if let Some(url) = b["continueUrl"].as_str().filter(|u| !u.is_empty()) {
+        v.url("continueUrl", url, false);
+    }
+    checked(v)?;
     let user = state.db.coll(auth::USERS).find_one(doc! { "email": &email }).await.map_err(db_fail)?;
     if kind != "EMAIL_SIGNIN" && user.is_none() {
         return Err(fail(StatusCode::NOT_FOUND, "no user with that email"));
@@ -293,6 +337,17 @@ async fn list_debug_tokens(State(state): State<AppState>) -> AdminResult {
 
 async fn add_debug_token(State(state): State<AppState>, payload: Bytes) -> AdminResult {
     let b: Json = body(&payload)?;
+    let mut v = crate::validate::V::new();
+    if let Some(t) = b["token"].as_str().filter(|t| !t.is_empty()) {
+        v.check(t.len() >= 16 && t.len() <= 256 && crate::validate::is_safe_id(t), "token", "must be 16-256 characters of A-Z a-z 0-9 . _ : - (leave empty to generate one)");
+    }
+    if let Some(name) = b["name"].as_str() {
+        v.text("name", name, 100);
+    }
+    if let Some(app) = b["app_id"].as_str().filter(|a| !a.is_empty()) {
+        v.id("app_id", app, crate::validate::limits::ID);
+    }
+    checked(v)?;
     let token = b["token"].as_str().map(str::to_string).filter(|t| t.len() >= 16).unwrap_or_else(|| uuid::Uuid::new_v4().to_string().to_uppercase());
     state
         .db
@@ -310,6 +365,12 @@ async fn remove_debug_token(State(state): State<AppState>, Path(token): Path<Str
 
 async fn mint_appcheck(State(state): State<AppState>, Path(app_id): Path<String>, payload: Bytes) -> AdminResult {
     let b: Json = body(&payload)?;
+    let mut v = crate::validate::V::new();
+    v.id("app_id", &app_id, crate::validate::limits::ID);
+    if let Some(t) = b.get("ttl_seconds").filter(|t| !t.is_null()) {
+        v.check(t.as_u64().is_some_and(|t| (1800..=7 * 86400).contains(&t)), "ttl_seconds", "must be between 1800 and 604800");
+    }
+    checked(v)?;
     let ttl = b["ttl_seconds"].as_u64().map(|t| t.clamp(1800, 7 * 86400));
     done(super::appcheck::issue(&state, &app_id, "custom", b["limited_use"].as_bool().unwrap_or(false), ttl))
 }
@@ -536,13 +597,27 @@ async fn upsert_named_function(State(state): State<AppState>, Path(name): Path<S
 }
 
 async fn save_function(state: &AppState, name: &str, b: &Json) -> AdminResult {
-    if name.is_empty() || name.len() > 63 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        return Err(fail(StatusCode::BAD_REQUEST, "name: 1–63 letters, digits, _ or -"));
+    if !functions::is_function_name(name) {
+        return Err(fail(StatusCode::BAD_REQUEST, "name: 1–63 letters, digits, _ or -, starting with a letter"));
     }
     let url = b["url"].as_str().unwrap_or_default();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(fail(StatusCode::BAD_REQUEST, "url must be http(s)://…"));
+    let mut v = crate::validate::V::new();
+    v.url("url", url, false);
+    if let Some(t) = b.get("timeout_seconds").filter(|t| !t.is_null()) {
+        v.check(t.as_i64().is_some_and(|t| (1..=540).contains(&t)), "timeout_seconds", "must be between 1 and 540");
     }
+    for key in ["enabled", "require_auth", "require_appcheck"] {
+        v.check(b.get(key).map_or(true, |x| x.is_null() || x.is_boolean()), key, "must be a boolean");
+    }
+    for (key, max) in [("region", 64), ("description", 500)] {
+        if let Some(text) = b[key].as_str() {
+            v.text(key, text, max);
+        }
+    }
+    if let Some(secret) = b["secret"].as_str().filter(|s| !s.is_empty()) {
+        v.len("secret", secret, 16, 256);
+    }
+    checked(v)?;
     let mut set = doc! {
         "url": url, "enabled": b["enabled"].as_bool().unwrap_or(true), "require_auth": b["require_auth"].as_bool().unwrap_or(false),
         "require_appcheck": b["require_appcheck"].as_bool().unwrap_or(false), "timeout_seconds": b["timeout_seconds"].as_i64().unwrap_or(60).clamp(1, 540),

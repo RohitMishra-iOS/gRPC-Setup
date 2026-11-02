@@ -66,11 +66,72 @@ fn files(state: &AppState) -> GridFsBucket {
     state.db.database.gridfs_bucket(GridFsBucketOptions::builder().bucket_name("storage_files".to_string()).build())
 }
 
+/// Cloud Storage object-name rules: 1–1024 bytes of UTF-8, no control characters (CR/LF
+/// included), no leading slash, no empty / "." / ".." segments, not under .well-known/acme-challenge.
 fn valid_name(name: &str) -> Result<(), ApiError> {
-    if name.is_empty() || name.len() > 1024 || name.starts_with('/') || name.contains("//") || name.split('/').any(|s| s == ".." || s == ".") || name.contains('\0') {
-        return Err(ApiError::bad_request("INVALID_ARGUMENT", "invalid object name"));
+    if name.is_empty()
+        || name.len() > crate::validate::limits::OBJECT_NAME_BYTES
+        || name.starts_with('/')
+        || name.contains("//")
+        || name.split('/').any(|s| s == ".." || s == ".")
+        || name.chars().any(char::is_control)
+        || name.starts_with(".well-known/acme-challenge/")
+    {
+        return Err(ApiError::bad_request(
+            "INVALID_ARGUMENT",
+            "invalid object name (1-1024 bytes, no control characters, no leading '/', no empty, '.' or '..' segments)",
+        ));
     }
     Ok(())
+}
+
+/// Bucket names: 1–222 characters of a-z 0-9 . _ - starting and ending with a letter or digit.
+fn valid_bucket(bucket: &str) -> Result<(), ApiError> {
+    let ok = !bucket.is_empty()
+        && bucket.len() <= 222
+        && bucket.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+        && bucket.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && bucket.ends_with(|c: char| c.is_ascii_alphanumeric());
+    if ok { Ok(()) } else { Err(ApiError::bad_request("INVALID_ARGUMENT", "invalid bucket name (a-z 0-9 . _ -, at most 222 characters)")) }
+}
+
+/// Settable metadata fields (sizes and formats).
+fn validate_metadata(v: &mut crate::validate::V, content_type: Option<&str>, cache_control: Option<&str>, disposition: Option<&str>, encoding: Option<&str>, language: Option<&str>, custom: Option<&Json>) {
+    use crate::validate::limits;
+    if let Some(ct) = content_type.filter(|c| !c.is_empty()) {
+        v.check(crate::validate::is_content_type(ct), "contentType", "must be a MIME type like image/png");
+    }
+    for (field, value, max) in [("cacheControl", cache_control, 1024), ("contentDisposition", disposition, 1024), ("contentEncoding", encoding, 64), ("contentLanguage", language, 35)] {
+        if let Some(value) = value {
+            v.text(field, value, max);
+        }
+    }
+    match custom {
+        None | Some(Json::Null) => {}
+        Some(Json::Object(map)) => {
+            let mut total = 0;
+            for (k, value) in map {
+                v.len(&format!("metadata.{k}"), k, 1, limits::CUSTOM_METADATA_KEY);
+                match value {
+                    Json::String(text) => {
+                        total += k.len() + text.len();
+                        v.printable(&format!("metadata.{k}"), text);
+                    }
+                    Json::Null => {}
+                    _ => v.fail(format!("metadata.{k}"), "custom metadata values must be strings"),
+                }
+            }
+            v.check(total <= limits::CUSTOM_METADATA_BYTES, "metadata", format!("custom metadata must total at most {} bytes", limits::CUSTOM_METADATA_BYTES));
+        }
+        Some(_) => v.fail("metadata", "must be an object of strings"),
+    }
+}
+
+fn check_meta_body(meta: &MetadataBody) -> ApiResult<()> {
+    let mut v = crate::validate::V::new();
+    let custom = meta.metadata.clone().map(Json::Object);
+    validate_metadata(&mut v, meta.content_type.as_deref(), meta.cache_control.as_deref(), meta.content_disposition.as_deref(), meta.content_encoding.as_deref(), meta.content_language.as_deref(), custom.as_ref());
+    v.into_api()
 }
 
 // ── Rules ────────────────────────────────────────────────────────────────────
@@ -276,6 +337,7 @@ fn md5_digest(data: &[u8]) -> [u8; 16] {
 }
 
 pub async fn upload(State(state): State<AppState>, Path(bucket): Path<String>, Query(query): Query<UploadQuery>, headers: HeaderMap, body: Bytes) -> ApiResult {
+    valid_bucket(&bucket)?;
     let caller = caller(&state, &headers, query.key.as_deref(), "storage").await?;
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let content_type = header("content-type");
@@ -287,7 +349,12 @@ pub async fn upload(State(state): State<AppState>, Path(bucket): Path<String>, Q
         let meta: MetadataBody = if body.is_empty() { MetadataBody::default() } else { super::parse_json(&body)? };
         let name = meta.name.clone().filter(|n| !n.is_empty()).unwrap_or(query.name.clone());
         valid_name(&name)?;
-        let size: Option<i64> = header("x-goog-upload-header-content-length").parse().ok();
+        check_meta_body(&meta)?;
+        let declared = header("x-goog-upload-header-content-length");
+        let size: Option<i64> = declared.parse().ok();
+        if !declared.is_empty() && size.map_or(true, |s| s < 0) {
+            return Err(ApiError::bad_request("INVALID_ARGUMENT", "X-Goog-Upload-Header-Content-Length must be a non-negative integer"));
+        }
         if size.is_some_and(|s| s as usize > state.config.platform.storage_max_bytes) {
             return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "OBJECT_TOO_LARGE", "file exceeds the size limit"));
         }
@@ -324,6 +391,7 @@ pub async fn upload(State(state): State<AppState>, Path(bucket): Path<String>, Q
     };
     let name = meta.name.clone().filter(|n| !n.is_empty()).unwrap_or(query.name.clone());
     valid_name(&name)?;
+    check_meta_body(&meta)?;
     let stored = store(&state, &caller, &bucket, &name, data, meta, part_type).await?;
     ok(metadata_json(&stored))
 }
@@ -437,6 +505,8 @@ pub struct ObjectQuery {
 }
 
 pub async fn get_object(State(state): State<AppState>, Path((bucket, object)): Path<(String, String)>, Query(query): Query<ObjectQuery>, method: Method, headers: HeaderMap) -> ApiResult {
+    valid_bucket(&bucket)?;
+    valid_name(&object)?;
     let name = object;
     let meta = find(&state, &bucket, &name).await?;
     // A matching download token bypasses the rules (download URLs are capabilities).
@@ -501,9 +571,23 @@ fn parse_range(header: &str, size: usize) -> Option<(usize, usize)> {
 }
 
 pub async fn update_metadata(State(state): State<AppState>, Path((bucket, name)): Path<(String, String)>, Query(query): Query<ObjectQuery>, headers: HeaderMap, body: Bytes) -> ApiResult {
+    valid_bucket(&bucket)?;
+    valid_name(&name)?;
     let caller = caller(&state, &headers, query.key.as_deref(), "storage").await?;
-    let meta = find(&state, &bucket, &name).await?.ok_or_else(|| ApiError::not_found(format!("object {name} does not exist")))?;
     let update: Json = super::parse_json(&body)?;
+    {
+        let mut v = crate::validate::V::new();
+        if !update.is_object() {
+            v.fail("body", "must be a JSON object");
+        }
+        let text = |k: &str| update.get(k).and_then(Json::as_str);
+        for key in ["contentType", "cacheControl", "contentDisposition", "contentEncoding", "contentLanguage"] {
+            v.check(matches!(update.get(key), None | Some(Json::Null) | Some(Json::String(_))), key, "must be a string or null");
+        }
+        validate_metadata(&mut v, text("contentType"), text("cacheControl"), text("contentDisposition"), text("contentEncoding"), text("contentLanguage"), update.get("metadata"));
+        v.into_api()?;
+    }
+    let meta = find(&state, &bucket, &name).await?.ok_or_else(|| ApiError::not_found(format!("object {name} does not exist")))?;
     let mut incoming = rules_resource(&meta);
     if let Some(ct) = update.get("contentType") {
         incoming["contentType"] = ct.clone();
@@ -550,6 +634,8 @@ pub async fn update_metadata(State(state): State<AppState>, Path((bucket, name))
 }
 
 pub async fn delete_object(State(state): State<AppState>, Path((bucket, name)): Path<(String, String)>, Query(query): Query<ObjectQuery>, headers: HeaderMap) -> ApiResult {
+    valid_bucket(&bucket)?;
+    valid_name(&name)?;
     let caller = caller(&state, &headers, query.key.as_deref(), "storage").await?;
     let meta = find(&state, &bucket, &name).await?;
     authorize(&state, &caller, &name, Op::Delete, Json::Null, meta.as_ref().map(rules_resource).unwrap_or(Json::Null)).await?;
@@ -577,6 +663,17 @@ pub struct ListQuery {
 }
 
 pub async fn list(State(state): State<AppState>, Path(bucket): Path<String>, Query(query): Query<ListQuery>, headers: HeaderMap) -> ApiResult {
+    valid_bucket(&bucket)?;
+    let mut v = crate::validate::V::new();
+    v.check(query.prefix.len() <= crate::validate::limits::OBJECT_NAME_BYTES && !query.prefix.chars().any(char::is_control) && !query.prefix.starts_with('/'), "prefix", "must be at most 1024 bytes without control characters or a leading '/'");
+    v.check(query.delimiter.is_empty() || query.delimiter == "/", "delimiter", "must be empty or \"/\"");
+    if let Some(max) = query.max_results {
+        v.range("maxResults", max, 1, crate::validate::limits::LIST_MAX_RESULTS);
+    }
+    if let Some(token) = &query.page_token {
+        v.text("pageToken", token, crate::validate::limits::OBJECT_NAME_BYTES + 64);
+    }
+    v.into_api()?;
     let caller = caller(&state, &headers, query.key.as_deref(), "storage").await?;
     let list_path = query.prefix.trim_end_matches('/');
     authorize(&state, &caller, if list_path.is_empty() { "/" } else { list_path }, Op::List, Json::Null, Json::Null).await?;
@@ -714,5 +811,9 @@ mod tests {
         assert!(valid_name("../x").is_err());
         assert!(valid_name("/x").is_err());
         assert!(valid_name("a//b").is_err());
+        assert!(valid_name("a/b\nc").is_err());
+        assert!(valid_name(&"x".repeat(1025)).is_err());
+        assert!(valid_bucket("default").is_ok() && valid_bucket("dmart-app.appspot.com").is_ok());
+        assert!(valid_bucket("Bad").is_err() && valid_bucket("-x").is_err() && valid_bucket("").is_err());
     }
 }

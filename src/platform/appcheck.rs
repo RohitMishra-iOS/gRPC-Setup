@@ -78,6 +78,37 @@ pub fn issue(state: &AppState, app_id: &str, provider: &str, limited_use: bool, 
     json!({ "token": state.tokens.sign(&claims), "ttl_seconds": claims.exp - now })
 }
 
+/// Provider-specific required fields and sizes.
+fn validate_exchange(app_id: &str, b: &ExchangeBody) -> crate::validate::V {
+    use crate::validate::{limits, V};
+    let mut v = V::new();
+    v.id("app_id", app_id, limits::ID);
+    if v.one_of("provider", &b.provider, &["debug", "devicecheck", "playintegrity", "appattest"]) {
+        match b.provider.as_str() {
+            "debug" => {
+                v.len("token", &b.token, 8, 256);
+            }
+            "devicecheck" | "playintegrity" => {
+                v.len("token", &b.token, 16, 64 * 1024);
+            }
+            _ => {
+                v.len("key_id", &b.key_id, 16, 128);
+                v.len("challenge", &b.challenge, 16, 256);
+                if b.attestation.is_empty() == b.assertion.is_empty() {
+                    v.fail("attestation", "send either attestation (first time) or assertion (afterwards)");
+                }
+                v.check(b.attestation.len() <= 64 * 1024 && b.assertion.len() <= 16 * 1024, "attestation", "is too large");
+            }
+        }
+    }
+    if b.provider == "playintegrity" {
+        // Java package name: segments of letters/digits/underscores, at least two.
+        let parts: Vec<&str> = b.package_name.split('.').collect();
+        v.check(parts.len() >= 2 && b.package_name.len() <= 255 && parts.iter().all(|p| p.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')), "package_name", "must be an Android package name like com.dmart.app");
+    }
+    v
+}
+
 pub async fn exchange(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> ApiResult {
     let body: ExchangeBody = parse_json(&body)?;
     let app_id = if body.app_id.is_empty() {
@@ -85,9 +116,7 @@ pub async fn exchange(State(state): State<AppState>, headers: HeaderMap, body: B
     } else {
         body.app_id.clone()
     };
-    if app_id.is_empty() {
-        return Err(ApiError::bad_request("INVALID_ARGUMENT", "app_id is required"));
-    }
+    validate_exchange(&app_id, &body).into_api()?;
     if state.config.auth_enabled() {
         let key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("");
         if !state.config.key_allows(key, &app_id) {

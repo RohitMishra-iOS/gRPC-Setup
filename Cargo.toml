@@ -15,6 +15,7 @@ rand = "0.8"
 axum = { version = "0.7", features = ["multipart", "ws"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
+flate2 = "1"
 futures-util = { version = "0.3", features = ["io"] }
 hex = "0.4"
 jsonwebtoken = "9"
