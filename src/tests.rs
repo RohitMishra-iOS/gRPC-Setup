@@ -283,8 +283,21 @@ fn wire_format_matches_ios_reference_bytes() {
         entries: [("show_banner".to_string(), "true".to_string())].into(),
         template_version: 7,
         experiments: vec![Experiment { experiment_id: "exp1".into(), variant_id: "B".into() }],
+        partial: false,
     };
     assert_eq!(hex::encode(response.encode_to_vec()), "080112130a0b73686f775f62616e6e6572120474727565180722090a0465787031120142");
+
+    // Key subscriptions (same bytes as DMRemoteConfigSubscriptionTests on iOS).
+    let request = crate::pb_dm::FetchConfigRequest::decode(hex::decode("3801420a73706c6173685f694f53420a686f6d655f7469746c65").unwrap().as_slice()).unwrap();
+    assert!(request.is_realtime_check);
+    assert_eq!(request.subscribed_keys, vec!["splash_iOS".to_string(), "home_title".to_string()]);
+    let partial = FetchConfigResponse {
+        state: FetchState::Updated as i32,
+        entries: [("splash_iOS".to_string(), "v2".to_string())].into(),
+        partial: true,
+        ..Default::default()
+    };
+    assert_eq!(hex::encode(partial.encode_to_vec()), "080112100a0a73706c6173685f694f53120276322801");
 
     let report = CrashReport::decode(hex::decode("0a0272311001180198010bba010480208040").unwrap().as_slice()).unwrap();
     assert_eq!(report.id, "r1");

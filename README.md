@@ -212,6 +212,13 @@ Templates are JSON, versioned, and immutable. The newest version is served. Exam
   variant. The SDK turns them into `dm_exp_<id>` user properties on Analytics events.
 * Real-time: `PUT …?notify=true` sends a silent `rc_update` push to the app's devices; listening
   apps fetch at once. Otherwise they pick up changes on their next poll.
+* **Key subscriptions:** a real-time check (`is_realtime_check = true`) may carry
+  `subscribed_keys` (iOS `DMRemoteConfig.shared.subscribe(toKeys:)`). The server then evaluates the
+  subscribed keys for that device in the version the device has and in each newer publish, keeps
+  holding the check while none of them changed, and answers `FETCH_STATE_UPDATED` with
+  `partial = true` and only those keys as soon as one does. Publishing other parameters never wakes
+  the device. A subscribed key missing from a partial answer was removed. Validation: ≤ 500 keys,
+  each a valid parameter key, only on real-time checks. Test: `python3 tests/e2e_rc_subscriptions.py`.
 
 ## Admin API
 
