@@ -571,7 +571,27 @@ fn validate_fetch(r: &FetchConfigRequest) -> crate::validate::V {
     v.check(r.last_template_version >= 0, "last_template_version", "must not be negative");
     v.check(r.language_code.len() <= 35 && r.language_code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'), "language_code", "must be a BCP-47 tag like en-IN");
     v.check(r.country_code.is_empty() || (r.country_code.len() <= 3 && r.country_code.chars().all(|c| c.is_ascii_alphanumeric())), "country_code", "must be a region code like IN");
+    v.max_count("subscribed_keys", r.subscribed_keys.len(), MAX_SUBSCRIBED_KEYS);
+    for (i, key) in r.subscribed_keys.iter().enumerate().take(MAX_SUBSCRIBED_KEYS) {
+        v.check(is_param_key(key), format!("subscribed_keys[{i}]"), "must be a parameter key: letters, digits and _, starting with a letter or _, at most 256 characters");
+    }
+    v.check(r.subscribed_keys.is_empty() || r.is_realtime_check, "subscribed_keys", "only allowed on real-time checks (is_realtime_check = true)");
     v
+}
+
+pub const MAX_SUBSCRIBED_KEYS: usize = 500;
+
+/// Remote Config parameter key rule (same as the console / template validation).
+pub fn is_param_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    key.len() <= 256
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The subscribed keys' values for this device (absent keys stay absent).
+fn subset(entries: &HashMap<String, String>, keys: &std::collections::BTreeSet<String>) -> std::collections::BTreeMap<String, String> {
+    keys.iter().filter_map(|k| entries.get(k).map(|v| (k.clone(), v.clone()))).collect()
 }
 
 pub async fn fetch_config(state: &AppState, meta: &RequestMeta, request: FetchConfigRequest) -> Result<FetchConfigResponse, Status> {
@@ -591,8 +611,26 @@ pub async fn fetch_config(state: &AppState, meta: &RequestMeta, request: FetchCo
     // Real-time checks long-poll: when nothing newer than the device's version is published, hold
     // the request open (up to DM_RC_REALTIME_HOLD_SECONDS) and answer as soon as a publish lands.
     // Devices therefore see console changes within a second, without APNs.
+    //
+    // With subscribed_keys, a newer version only counts when it changes one of those keys for this
+    // device; publishes that touch other keys are skipped and the request keeps waiting.
     let hold = if request.is_realtime_check { Duration::from_secs(state.config.rc_realtime_hold_seconds) } else { Duration::ZERO };
     let deadline = tokio::time::Instant::now() + hold;
+    let ctx = eval_context(&request);
+    let subscribed: std::collections::BTreeSet<String> = request.subscribed_keys.iter().cloned().collect();
+    let filtered = request.is_realtime_check && !subscribed.is_empty();
+    // The device's current values for its subscribed keys (from the version it already has).
+    let baseline = if filtered && request.last_template_version > 0 {
+        template_version(state, &context.app_id, request.last_template_version)
+            .await
+            .map_err(unavailable)?
+            .map(|t| subset(&t.template.evaluate(&ctx).0, &subscribed))
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let mut seen = request.last_template_version;
+    let mut relevant = false;
     let stored = loop {
         // Register for the wake-up *before* reading, so a publish in between can't be missed.
         let notified = state.rc.published.notified();
@@ -600,8 +638,19 @@ pub async fn fetch_config(state: &AppState, meta: &RequestMeta, request: FetchCo
         notified.as_mut().enable();
         let stored = state.rc.template(state, &context.app_id).await.map_err(unavailable)?;
         let current = stored.as_ref().map_or(0, |t| t.version);
-        if hold.is_zero() || current > request.last_template_version {
+        if hold.is_zero() {
             break stored;
+        }
+        if current > seen {
+            if !filtered {
+                break stored;
+            }
+            let now = stored.as_ref().map(|t| subset(&t.template.evaluate(&ctx).0, &subscribed)).unwrap_or_default();
+            if now != baseline {
+                relevant = true;
+                break stored;
+            }
+            seen = current; // published, but none of the subscribed keys changed: keep waiting
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
             break stored; // held long enough: answer NO_CHANGE, the device asks again
@@ -614,8 +663,9 @@ pub async fn fetch_config(state: &AppState, meta: &RequestMeta, request: FetchCo
         return Ok(FetchConfigResponse { state: FetchState::NoTemplate as i32, ..Default::default() });
     };
 
-    // Real-time checks are cheap when nothing was published since the device's last fetch.
-    if request.is_realtime_check && stored.version <= request.last_template_version {
+    // Real-time checks are cheap when nothing was published since the device's last fetch (or,
+    // for a key subscription, nothing the device subscribed to changed).
+    if request.is_realtime_check && (stored.version <= request.last_template_version || (filtered && !relevant)) {
         return Ok(FetchConfigResponse {
             state: FetchState::NoChange as i32,
             template_version: stored.version,
@@ -623,11 +673,14 @@ pub async fn fetch_config(state: &AppState, meta: &RequestMeta, request: FetchCo
         });
     }
 
-    let ctx = eval_context(&request);
-    let (entries, experiments) = stored.template.evaluate(&ctx);
+    let (mut entries, experiments) = stored.template.evaluate(&ctx);
+    if filtered {
+        entries.retain(|k, _| subscribed.contains(k));
+    }
     Ok(FetchConfigResponse {
         state: FetchState::Updated as i32,
         entries,
+        partial: filtered,
         template_version: stored.version,
         experiments: experiments
             .into_iter()

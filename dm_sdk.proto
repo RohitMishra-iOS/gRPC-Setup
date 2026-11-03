@@ -152,11 +152,16 @@ message FetchConfigRequest {
   string language_code = 5;                 // e.g. "en-IN"
   string country_code = 6;                  // e.g. "IN"
   bool is_realtime_check = 7;               // listener poll / silent push, not an app fetch
+  // Key subscription (real-time checks only). When set, the backend holds the check until a publish
+  // changes at least one of these keys *for this device* (conditions evaluated), and answers with
+  // only these keys (partial = true). Publishes that touch other keys never wake the device.
+  // Empty = all keys (classic behaviour). ≤ 500 keys, each a valid parameter key.
+  repeated string subscribed_keys = 8;
 }
 
 enum FetchState {
   FETCH_STATE_UNSPECIFIED = 0;
-  FETCH_STATE_UPDATED = 1;                  // entries = full config for this device
+  FETCH_STATE_UPDATED = 1;                  // entries = full config for this device (or the subscribed keys when partial)
   FETCH_STATE_NO_CHANGE = 2;                // template_version <= last_template_version; entries empty
   FETCH_STATE_NO_TEMPLATE = 3;              // no config for this app; device falls back to defaults
 }
@@ -166,6 +171,9 @@ message FetchConfigResponse {
   map<string, string> entries = 2;          // conditions already evaluated server-side
   int64 template_version = 3;
   repeated Experiment experiments = 4;      // experiments this install is enrolled in
+  // True when the request had subscribed_keys: entries hold only those keys. A subscribed key that
+  // is missing from entries was removed from the template (or has no value for this device).
+  bool partial = 5;
 }
 
 message Experiment {
