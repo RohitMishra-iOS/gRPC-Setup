@@ -96,17 +96,18 @@ for name, method, path, body, extra, kind in cases:
             headers["x-api-key"] = key
         r = send(method, path, body, headers)
         ok = r.status_code == 401 if kind == "http" else grpc_status(r) == "16"
-        check(f"{name}: {label} → rejected", ok, f"HTTP {r.status_code} grpc={grpc_status(r) if kind == 'grpc' else '-'} {r.text[:150]}")
+        tag = "KEY-001, KEY-002" if "analytics" in name else "KEY-001"
+        check(f"[{tag}] {name}: {label} → rejected", ok, f"HTTP {r.status_code} grpc={grpc_status(r) if kind == 'grpc' else '-'} {r.text[:150]}")
     r = send(method, path, body, {**extra, "x-api-key": GOOD})
     # With the right key the request may still fail for its own reasons (e.g. a fake refresh
     # token), just never because of the key.
     key_error = "API_KEY" in r.text or "API key" in r.text or "x-api-key" in r.text
     ok = (r.status_code != 401 or not key_error) if kind == "http" else grpc_status(r) != "16"
-    check(f"{name}: right key → not rejected for the key", ok, f"HTTP {r.status_code} {r.text[:150]}")
+    check(f"[KEY-001] {name}: right key → not rejected for the key", ok, f"HTTP {r.status_code} {r.text[:150]}")
 
 # A key registered for another app is refused too.
 r = send("POST", "/v1/rpc/dm.sdk.v1.RemoteConfigService/FetchConfig", {"context": {**CTX, "appId": "dmart-ready"}}, {"x-api-key": GOOD, "x-dm-app-id": "dmart-ready"})
-check("key of another app → rejected", r.status_code == 401, r.text[:200])
+check("[KEY-003] key of another app → rejected", r.status_code == 401, r.text[:200])
 
 # The server must refuse to start without DM_API_KEYS (unless DM_ALLOW_UNAUTHENTICATED=true).
 binary = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "target", "debug", "grpc-status-server")
@@ -117,9 +118,9 @@ if os.path.exists(binary):
         # Run outside the server folder so its .env (which sets DM_API_KEYS) isn't loaded.
         p = subprocess.run([os.path.abspath(binary)], env=env, capture_output=True, text=True, timeout=30, cwd="/")
         out = p.stdout + p.stderr
-        check("server refuses to start without DM_API_KEYS", p.returncode != 0 and "DM_API_KEYS is not set" in out, out[-400:])
+        check("[KEY-004] server refuses to start without DM_API_KEYS", p.returncode != 0 and "DM_API_KEYS is not set" in out, out[-400:])
     except subprocess.TimeoutExpired:
-        check("server refuses to start without DM_API_KEYS", False, "server kept running")
+        check("[KEY-004] server refuses to start without DM_API_KEYS", False, "server kept running")
 else:
     print(f"SKIP startup check (no binary at {binary})")
 

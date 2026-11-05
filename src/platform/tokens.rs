@@ -143,6 +143,7 @@ pub fn valid_fid(fid: &str) -> bool {
 mod tests {
     use super::*;
 
+    // spec: INS-001
     #[test]
     fn fids_are_firebase_shaped() {
         for _ in 0..200 {
@@ -151,6 +152,7 @@ mod tests {
         }
     }
 
+    // spec: AUT-004
     #[test]
     fn token_types_cannot_be_swapped() {
         let tokens = Tokens::new("secret");

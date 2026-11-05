@@ -508,6 +508,7 @@ pub mod app_attest {
 mod tests {
     use super::*;
 
+    // spec: ACK-001
     #[test]
     fn play_integrity_verdicts() {
         let now = 1_800_000_000_000;
@@ -527,6 +528,7 @@ mod tests {
         assert!(check_integrity_verdict(&emulator, "com.dmart.ready", now).is_err());
     }
 
+    // spec: ACK-001
     #[test]
     fn app_attest_assertion_signature_and_counter() {
         use ring::rand::SystemRandom;

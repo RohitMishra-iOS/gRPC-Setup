@@ -156,6 +156,7 @@ fn error_status(status: &str) -> StatusCode {
 
 #[cfg(test)]
 mod tests {
+    // spec: FUN-001
     #[test]
     fn signature_is_stable() {
         let a = super::sign("s3cret", 1700000000, b"{\"data\":1}");

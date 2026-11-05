@@ -1,4 +1,5 @@
 """Web Push interop: server encrypts + VAPID-signs; http_ece (reference impl) decrypts."""
+# spec: MSG-001, MSG-003 (Web Push registration and RFC 8291 encryption, decrypted by the reference implementation)
 import base64, json, threading, requests, http_ece, jwt
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from cryptography.hazmat.primitives.asymmetric import ec

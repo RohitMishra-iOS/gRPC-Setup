@@ -468,7 +468,7 @@ Default (no rules saved): signed-in users can read and write everything. Express
 `/admin/functions…` — see `src/platform/admin.rs`.
 
 **Testing:** start a MongoDB replica set locally, run the server with `tests/e2e.env`, then
-`python3 tests/e2e_platform.py` (75 end-to-end checks), `python3 tests/e2e_validation.py` (49 input-validation checks) and `python3 tests/e2e_webpush.py` (Web Push decrypted by the RFC 8291 reference implementation).
+`python3 tests/e2e_platform.py` (75 end-to-end checks), `tests/e2e_validation.py` (53 input-validation checks), `tests/e2e_api_keys.py` (56 API key checks), `tests/e2e_rc_subscriptions.py` (9), `tests/e2e_contract.py` (5) and `tests/e2e_webpush.py` (Web Push decrypted by the RFC 8291 reference implementation). Every check names the requirement it proves (`[KEY-001] …`); the requirements live in the `dm-specs` project.
 
 ## Running in Development
 

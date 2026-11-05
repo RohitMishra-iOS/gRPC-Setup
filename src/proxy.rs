@@ -304,6 +304,7 @@ fn set_cors_headers(allowed_origins: &str, req: &HeaderMap, res: &mut HeaderMap)
 mod tests {
     use super::*;
 
+    // spec: WIRE-002
     #[test]
     fn frames_round_trip() {
         let f = frame(0x80, b"grpc-status:0\r\n");
@@ -311,6 +312,7 @@ mod tests {
         assert_eq!(u32::from_be_bytes([f[1], f[2], f[3], f[4]]) as usize, f.len() - 5);
     }
 
+    // spec: WIRE-002
     #[test]
     fn grpc_message_is_percent_encoded() {
         assert_eq!(encode_grpc_message("bad\r\nkey 100%"), "bad%0D%0Akey 100%25");
