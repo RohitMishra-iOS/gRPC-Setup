@@ -43,9 +43,9 @@ pub struct Config {
     pub dsym_cache_dir: std::path::PathBuf,
     /// Platform services (Installations, App Check, Auth, Storage, Functions, Database).
     pub platform: PlatformConfig,
-    /// Reject /events and CheckStatus batches without a valid API key (DM_EVENTS_REQUIRE_API_KEY).
-    /// Off by default so 1.x iOS builds (which send no key) keep working; a key that *is* sent is
-    /// always checked against the batch's app_id.
+    /// Reject /events and CheckStatus batches without a valid API key. On by default whenever
+    /// DM_API_KEYS is set; DM_EVENTS_REQUIRE_API_KEY=false lets keyless batches from old iOS builds
+    /// through during a migration. A key that *is* sent is always checked against the batch's app_id.
     pub events_require_api_key: bool,
 }
 
@@ -127,7 +127,7 @@ impl Config {
                 .map(Into::into)
                 .unwrap_or_else(|| std::env::temp_dir().join("dm-dsym-cache")),
             platform: PlatformConfig::from_env(),
-            events_require_api_key: env_nonempty("DM_EVENTS_REQUIRE_API_KEY").is_some_and(|v| v == "true" || v == "1"),
+            events_require_api_key: env_nonempty("DM_EVENTS_REQUIRE_API_KEY").map_or(true, |v| v != "false" && v != "0"),
         }
     }
 

@@ -65,9 +65,9 @@ async fn cors(State(state): State<AppState>, request: Request, next: Next) -> Re
 }
 
 /// API key check for analytics batches: a key that is sent (x-api-key, or Authorization: Bearer
-/// from the iOS HTTP transport) must be valid for the batch's app; no key is accepted unless
-/// DM_EVENTS_REQUIRE_API_KEY is set.
-fn events_key_check(state: &AppState, headers: &HeaderMap, app_id: &str) -> Result<(), String> {
+/// from the iOS HTTP transport) must be valid for the batch's app, and a missing key is rejected
+/// unless DM_EVENTS_REQUIRE_API_KEY=false.
+pub(crate) fn events_key_check(state: &AppState, headers: &HeaderMap, app_id: &str) -> Result<(), String> {
     if !state.config.auth_enabled() {
         return Ok(());
     }

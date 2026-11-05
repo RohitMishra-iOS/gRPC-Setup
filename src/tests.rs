@@ -11,7 +11,7 @@ use crate::dm::{AppState, RequestMeta};
 use crate::pb_dm::{
     ClientContext, CrashKind, CrashReport, FetchConfigRequest, UpdateTopicSubscriptionRequest, UploadCrashReportsRequest,
 };
-use crate::proxy::dispatch;
+use crate::proxy::{dispatch, events_key_check};
 
 const DEAD_MONGO: &str = "mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=200&connectTimeoutMS=200";
 
@@ -44,6 +44,28 @@ async fn rejects_missing_and_wrong_api_keys() {
     assert_eq!(err.code(), Code::Unauthenticated);
     let err = dispatch(&s, &meta(Some("key-dmart")), FETCH, &fetch("other-app")).await.unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated, "app-scoped key must not work for another app");
+}
+
+#[tokio::test]
+async fn analytics_batches_need_a_valid_api_key() {
+    let s = state(100).await;
+    let headers = |key: &str| {
+        let mut h = axum::http::HeaderMap::new();
+        if !key.is_empty() {
+            h.insert("x-api-key", key.parse().unwrap());
+        }
+        h
+    };
+    assert!(events_key_check(&s, &headers(""), "dmart").is_err(), "missing key must be rejected");
+    assert!(events_key_check(&s, &headers("test"), "dmart").is_err(), "wrong key must be rejected");
+    assert!(events_key_check(&s, &headers("key-dmart"), "other-app").is_err());
+    assert!(events_key_check(&s, &headers("key-dmart"), "dmart").is_ok());
+
+    let mut config = s.config.clone();
+    config.events_require_api_key = false;
+    let s = AppState::new(Db::lazy(DEAD_MONGO).await, config).expect("state");
+    assert!(events_key_check(&s, &headers(""), "dmart").is_ok(), "opt-out accepts keyless batches");
+    assert!(events_key_check(&s, &headers("test"), "dmart").is_err(), "a sent key is still checked");
 }
 
 #[tokio::test]

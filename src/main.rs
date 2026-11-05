@@ -59,6 +59,9 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 fn log_config(config: &Config) {
     if config.auth_enabled() {
         println!("✅  API keys            → {} configured (x-api-key required on dm.sdk.v1)", config.api_keys.len());
+        if !config.events_require_api_key {
+            println!("⚠️  DM_EVENTS_REQUIRE_API_KEY=false → analytics batches without a key are accepted");
+        }
     } else {
         println!("⚠️  DM_API_KEYS unset   → dm.sdk.v1 services accept unauthenticated calls (dev only)");
     }

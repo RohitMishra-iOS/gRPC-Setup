@@ -522,7 +522,7 @@ The main rules:
 
 | Area | Rules |
 |---|---|
-| Analytics | ≤ 500 events/batch; event + parameter names `^[A-Za-z][A-Za-z0-9_]*$` ≤ 40; ≤ 25 custom parameters; strings ≤ 500; items ≤ 200 × 27 params; user properties ≤ 24/36 chars; timestamps within 30 days back / 1 day ahead; consent `granted`/`denied`; gzip bodies; API key checked when sent (required with `DM_EVENTS_REQUIRE_API_KEY`) |
+| Analytics | ≤ 500 events/batch; event + parameter names `^[A-Za-z][A-Za-z0-9_]*$` ≤ 40; ≤ 25 custom parameters; strings ≤ 500; items ≤ 200 × 27 params; user properties ≤ 24/36 chars; timestamps within 30 days back / 1 day ahead; consent `granted`/`denied`; gzip bodies; API key required when `DM_API_KEYS` is set (`DM_EVENTS_REQUIRE_API_KEY=false` accepts keyless batches) |
 | Client context (all RPCs) | ids `[A-Za-z0-9._:-]` ≤ 128; known `platform` and `network_type`; text fields ≤ 256 |
 | Crashlytics | ≤ 64 keys (≤ 1 KB each), logs ≤ 128 KB, ≤ 1024 frames, known kind, sane timestamps |
 | Performance | Firebase trace rules (no leading `_` for custom traces, ≤ 100 chars), ≤ 32 metrics, ≤ 5 (+SDK) attributes, duration 0–24 h, valid URL/method/status for network records |
