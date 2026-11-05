@@ -52,8 +52,10 @@ services:
         value: "grpc_status"
 
       # ── DM SDK 2.0 (Crashlytics / Remote Config / Performance / Messaging) ──
-      # API keys the iOS SDK sends as x-api-key. Comma-separated; "app_id:key" scopes a key to
-      # one app. Leave unset only for local development (calls are then unauthenticated).
+      # REQUIRED. API keys the apps send as x-api-key, comma-separated; "app_id:key" scopes a key
+      # to one app, e.g. dmart-ready:dm_app_…,dmart-ready-ios:dm_app_…  Enter it in the Render
+      # dashboard (Environment). Without it the server refuses to start; requests with a missing or
+      # wrong key are rejected with 401.
       - key: DM_API_KEYS
         sync: false
 

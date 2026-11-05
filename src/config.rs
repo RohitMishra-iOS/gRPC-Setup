@@ -46,7 +46,13 @@ pub struct Config {
     /// Reject /events and CheckStatus batches without a valid API key (DM_EVENTS_REQUIRE_API_KEY).
     /// Off by default so 1.x iOS builds (which send no key) keep working; a key that *is* sent is
     /// always checked against the batch's app_id.
+    /// Events (/events, CheckStatus) without an x-api-key are rejected. Default true; set
+    /// DM_EVENTS_REQUIRE_API_KEY=false only while old app versions that send no key are still live
+    /// (a key that *is* sent is always checked).
     pub events_require_api_key: bool,
+    /// DM_ALLOW_UNAUTHENTICATED=true: run without DM_API_KEYS (no key checks at all). Local
+    /// development only; without it the server refuses to start when DM_API_KEYS is unset.
+    pub allow_unauthenticated: bool,
 }
 
 /// Settings for the /v1 platform services. See README "Platform services".
@@ -127,13 +133,18 @@ impl Config {
                 .map(Into::into)
                 .unwrap_or_else(|| std::env::temp_dir().join("dm-dsym-cache")),
             platform: PlatformConfig::from_env(),
-            events_require_api_key: env_nonempty("DM_EVENTS_REQUIRE_API_KEY").is_some_and(|v| v == "true" || v == "1"),
+            events_require_api_key: !env_nonempty("DM_EVENTS_REQUIRE_API_KEY").is_some_and(|v| v == "false" || v == "0"),
+            allow_unauthenticated: env_nonempty("DM_ALLOW_UNAUTHENTICATED").is_some_and(|v| v == "true" || v == "1"),
         }
     }
 
     /// Configuration problems: (fatal, message). Fatal ones stop the server at startup.
     pub fn problems(&self) -> Vec<(bool, String)> {
         let mut out = Vec::new();
+        if self.api_keys.is_empty() && !self.allow_unauthenticated {
+            out.push((true, "DM_API_KEYS is not set, so every client request would be accepted without an API key. \
+                Set DM_API_KEYS=<app_id>:<key>,… (e.g. dmart-ready:dm_app_…), or DM_ALLOW_UNAUTHENTICATED=true for local development only".to_string()));
+        }
         for (app, key) in &self.api_keys {
             if let Some(app) = app {
                 if !crate::validate::is_safe_id(app) || app.len() > crate::validate::limits::ID {

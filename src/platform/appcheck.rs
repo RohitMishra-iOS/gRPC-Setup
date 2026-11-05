@@ -116,13 +116,9 @@ pub async fn exchange(State(state): State<AppState>, headers: HeaderMap, body: B
     } else {
         body.app_id.clone()
     };
+    // Key first: an unknown caller learns nothing about the request's validity.
+    super::require_api_key(&state, &headers, Some(&app_id))?;
     validate_exchange(&app_id, &body).into_api()?;
-    if state.config.auth_enabled() {
-        let key = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("");
-        if !state.config.key_allows(key, &app_id) {
-            return Err(ApiError::unauthenticated("API_KEY_INVALID", "missing or invalid x-api-key for this app"));
-        }
-    }
     match body.provider.as_str() {
         "debug" => verify_debug(&state, &app_id, &body.token).await?,
         "devicecheck" => verify_devicecheck(&state, &body.token).await?,
@@ -147,9 +143,11 @@ struct VerifyBody {
     consume: bool,
 }
 
-pub async fn verify(State(state): State<AppState>, body: Bytes) -> ApiResult {
+pub async fn verify(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> ApiResult {
     let body: VerifyBody = parse_json(&body)?;
     let claims = verify_token(&state, &body.token).await.map_err(|e| ApiError::unauthenticated("APP_CHECK_INVALID", e))?;
+    // Your backend calls this with the app's key (or an unscoped key from DM_API_KEYS).
+    super::require_api_key(&state, &headers, Some(&claims.sub))?;
     let mut already_consumed = false;
     if body.consume || claims.limited_use {
         let record = doc! { "_id": &claims.jti, "expires_at": DateTime::from_millis(claims.exp * 1000) };
@@ -302,8 +300,9 @@ struct ChallengeBody {
 }
 
 /// One-time challenge for App Attest (valid 5 minutes).
-pub async fn challenge(State(state): State<AppState>, body: Bytes) -> ApiResult {
+pub async fn challenge(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> ApiResult {
     let body: ChallengeBody = parse_json(&body)?;
+    super::require_api_key(&state, &headers, Some(&body.app_id))?;
     let challenge = tokens::random_token();
     state
         .db

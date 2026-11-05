@@ -397,6 +397,7 @@ pub async fn upload(State(state): State<AppState>, Path(bucket): Path<String>, Q
 }
 
 pub async fn resumable(State(state): State<AppState>, Path(session): Path<String>, headers: HeaderMap, body: Bytes) -> ApiResult {
+    super::require_api_key(&state, &headers, None)?;
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
     let command = header("x-goog-upload-command");
     let uploads = state.db.coll(UPLOADS);

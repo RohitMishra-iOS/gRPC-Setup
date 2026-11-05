@@ -145,7 +145,8 @@ async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri,
         let app_id = StatusRequest::decode(&body[5..(5 + declared).min(body.len())])
             .ok()
             .and_then(|r| r.message.map(|m| grpc::struct_to_json(&m)))
-            .and_then(|j| j.get("app_id").and_then(|a| a.as_str()).map(str::to_string))
+            .and_then(|j| j.get("app_id").and_then(|a| a.as_str()).filter(|a| !a.is_empty()).map(str::to_string))
+            .or_else(|| headers.get("x-dm-app-id").and_then(|v| v.to_str().ok()).map(str::to_string))
             .unwrap_or_default();
         if let Err(message) = events_key_check(&state, &headers, &app_id) {
             return grpc_error_response(Status::unauthenticated(message));

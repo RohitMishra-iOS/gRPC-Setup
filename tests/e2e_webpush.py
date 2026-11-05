@@ -20,7 +20,7 @@ class Push(BaseHTTPRequestHandler):
         self.send_response(201); self.end_headers()
 
 srv = HTTPServer(("127.0.0.1", 8098), Push); threading.Thread(target=srv.serve_forever, daemon=True).start()
-vapid_public = requests.get(B + "/v1/messaging/webpush-key").json()["publicKey"]
+vapid_public = requests.get(B + "/v1/messaging/webpush-key", headers=H).json()["publicKey"]
 r = requests.post(B + "/v1/rpc/dm.sdk.v1.MessagingService/RegisterDevice", headers=H, json={
     "context": {"appId": "dmart-ready-ios", "installationId": "web-install-1", "platform": "web"},
     "pushTransport": "webpush", "webPush": {"endpoint": "http://127.0.0.1:8098/push/abc", "p256dh": b64u(ua_pub), "auth": b64u(auth)}, "topics": ["news"]})

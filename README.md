@@ -111,7 +111,9 @@ keeps its 1.x behaviour of no expiry unless `DM_ANALYTICS_RETENTION_DAYS` is set
 | `ALLOWED_ORIGINS` | `*` | CORS origins |
 | `MONGODB_URI` | — | **Required** |
 | `MONGODB_DB_NAME` | `grpc_status` | Database name |
-| `DM_API_KEYS` | — | `key` or `app_id:key`, comma-separated. Required as `x-api-key` on dm.sdk.v1 and `/v1/symbols`. **Unset = no auth (dev only).** `CheckStatus` stays open, as in 1.x |
+| `DM_API_KEYS` | — | **Required.** `key` or `app_id:key`, comma-separated. Every client request (dm.sdk.v1, `/events`, `CheckStatus`, `/v1/*` platform APIs, `/v1/symbols`) must send a matching `x-api-key`; a missing or wrong key gets 401 `UNAUTHENTICATED`. The server refuses to start without it |
+| `DM_EVENTS_REQUIRE_API_KEY` | `true` | `false` lets analytics batches *without* a key through (old app builds that send none). A key that is sent is always checked |
+| `DM_ALLOW_UNAUTHENTICATED` | `false` | `true` = start without `DM_API_KEYS` and check no keys at all. Local development only |
 | `DM_ADMIN_KEY` | — | Enables `/admin` (send as `x-admin-key`) |
 | `DM_RETENTION_DAYS` | `90` | TTL for crash/perf/push documents (0 = forever) |
 | `DM_ANALYTICS_RETENTION_DAYS` | `0` | TTL for `event_data` (0 = forever) |
@@ -522,7 +524,7 @@ The main rules:
 
 | Area | Rules |
 |---|---|
-| Analytics | ≤ 500 events/batch; event + parameter names `^[A-Za-z][A-Za-z0-9_]*$` ≤ 40; ≤ 25 custom parameters; strings ≤ 500; items ≤ 200 × 27 params; user properties ≤ 24/36 chars; timestamps within 30 days back / 1 day ahead; consent `granted`/`denied`; gzip bodies; API key checked when sent (required with `DM_EVENTS_REQUIRE_API_KEY`) |
+| Analytics | ≤ 500 events/batch; event + parameter names `^[A-Za-z][A-Za-z0-9_]*$` ≤ 40; ≤ 25 custom parameters; strings ≤ 500; items ≤ 200 × 27 params; user properties ≤ 24/36 chars; timestamps within 30 days back / 1 day ahead; consent `granted`/`denied`; gzip bodies; valid API key required (`DM_EVENTS_REQUIRE_API_KEY=false` admits keyless batches from old builds) |
 | Client context (all RPCs) | ids `[A-Za-z0-9._:-]` ≤ 128; known `platform` and `network_type`; text fields ≤ 256 |
 | Crashlytics | ≤ 64 keys (≤ 1 KB each), logs ≤ 128 KB, ≤ 1024 frames, known kind, sane timestamps |
 | Performance | Firebase trace rules (no leading `_` for custom traces, ≤ 100 chars), ≤ 32 metrics, ≤ 5 (+SDK) attributes, duration 0–24 h, valid URL/method/status for network records |

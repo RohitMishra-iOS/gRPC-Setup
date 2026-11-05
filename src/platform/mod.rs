@@ -96,7 +96,8 @@ async fn ttl_on(db: &crate::db::Db, collection: &str, field: &str) {
 }
 
 /// The VAPID public key browsers subscribe with (PushManager.subscribe applicationServerKey).
-async fn webpush_key(axum::extract::State(state): axum::extract::State<AppState>) -> ApiResult {
+async fn webpush_key(axum::extract::State(state): axum::extract::State<AppState>, headers: HeaderMap) -> ApiResult {
+    require_api_key(&state, &headers, None)?;
     match &state.webpush {
         Some(wp) => ok(json!({ "publicKey": wp.public_key() })),
         None => Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "WEBPUSH_NOT_CONFIGURED", "set DM_WEBPUSH_VAPID_PRIVATE_KEY (generate with POST /admin/messaging/webpush/keys)")),
@@ -200,6 +201,20 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 pub fn bearer(headers: &HeaderMap) -> Option<&str> {
     header(headers, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+}
+
+/// API key check for endpoints that don't resolve a full caller: the key (x-api-key) must be valid
+/// for `app_id` (from the request body, else the x-dm-app-id header).
+pub fn require_api_key(state: &AppState, headers: &HeaderMap, app_id: Option<&str>) -> ApiResult<()> {
+    if !state.config.auth_enabled() {
+        return Ok(());
+    }
+    let app_id = app_id.filter(|a| !a.is_empty()).or_else(|| header(headers, "x-dm-app-id")).unwrap_or("");
+    match header(headers, "x-api-key") {
+        Some(key) if state.config.key_allows(key, app_id) => Ok(()),
+        Some(_) => Err(ApiError::unauthenticated("API_KEY_INVALID", "API key not valid for this app (check x-dm-app-id)")),
+        None => Err(ApiError::unauthenticated("API_KEY_MISSING", "x-api-key header is required")),
+    }
 }
 
 /// Resolves the caller for `product` ("auth", "storage", "functions", "database", "rpc"):
