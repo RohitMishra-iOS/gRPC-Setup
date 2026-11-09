@@ -1,4 +1,4 @@
-//! POST /v1/rpc/:service/:method — every dm.sdk.v1 RPC (Crashlytics, Remote Config, Performance,
+//! POST /v1/rpc/:service/:method — every dm.sdk.v1 RPC (Analytics, Crashlytics, Remote Config, Performance,
 //! Messaging) as proto3 JSON, served by the same handlers as gRPC / gRPC-Web. Field names may be
 //! lowerCamelCase or the original snake_case; responses use lowerCamelCase, int64 as strings
 //! (standard proto3 JSON mapping). Errors come back as HTTP status + {"error": {...}}.
@@ -29,8 +29,9 @@ where
 }
 
 pub async fn dispatch_json(state: &AppState, meta: &RequestMeta, path: &str, body: &[u8]) -> Result<Vec<u8>, Status> {
-    use dm::{crashlytics, messaging, performance, remote_config};
+    use dm::{analytics, crashlytics, messaging, performance, remote_config};
     match path {
+        "dm.sdk.v1.AnalyticsService/UploadEvents" => call_json(body, |r| analytics::upload_events(state, meta, r)).await,
         "dm.sdk.v1.CrashlyticsService/UploadCrashReports" => call_json(body, |r| crashlytics::upload_crash_reports(state, meta, r)).await,
         "dm.sdk.v1.RemoteConfigService/FetchConfig" => call_json(body, |r| remote_config::fetch_config(state, meta, r)).await,
         "dm.sdk.v1.PerformanceService/UploadPerformance" => call_json(body, |r| performance::upload_performance(state, meta, r)).await,

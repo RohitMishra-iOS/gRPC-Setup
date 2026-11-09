@@ -61,6 +61,8 @@ context_pb = field(1, APP.encode()) + field(2, INST.encode())
 cases = [
     ("analytics /events (JSON)", "POST", "/events", {"app_id": APP, "batch_id": str(uuid.uuid4()), "installation_id": INST, "events": [{"name": "key_test", "timestamp_ms": 0}]}, {}, "http"),
     ("analytics CheckStatus (gRPC-Web, iOS)", "POST", "/status.StatusService/CheckStatus", grpc_frame(b""), {"content-type": "application/grpc-web+proto", "x-dm-app-id": APP}, "grpc"),
+    ("Analytics UploadEvents (gRPC-Web)", "POST", "/dm.sdk.v1.AnalyticsService/UploadEvents", grpc_frame(field(1, context_pb)), {"content-type": "application/grpc-web+proto"}, "grpc"),
+    ("Analytics UploadEvents (JSON)", "POST", "/v1/rpc/dm.sdk.v1.AnalyticsService/UploadEvents", {"context": CTX, "events": []}, {}, "http"),
     ("Remote Config FetchConfig (gRPC-Web)", "POST", "/dm.sdk.v1.RemoteConfigService/FetchConfig", grpc_frame(field(1, context_pb)), {"content-type": "application/grpc-web+proto"}, "grpc"),
     ("Remote Config FetchConfig (JSON)", "POST", "/v1/rpc/dm.sdk.v1.RemoteConfigService/FetchConfig", {"context": CTX}, {}, "http"),
     ("Crashlytics upload", "POST", "/v1/rpc/dm.sdk.v1.CrashlyticsService/UploadCrashReports", {"context": CTX, "reports": []}, {}, "http"),

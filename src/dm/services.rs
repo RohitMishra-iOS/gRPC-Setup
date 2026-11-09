@@ -3,20 +3,30 @@
 
 use tonic::{Request, Response, Status};
 
-use super::{crashlytics, messaging, performance, remote_config, AppState, RequestMeta};
+use super::{analytics, crashlytics, messaging, performance, remote_config, AppState, RequestMeta};
+use crate::pb_dm::analytics_service_server::AnalyticsService;
 use crate::pb_dm::crashlytics_service_server::CrashlyticsService;
 use crate::pb_dm::messaging_service_server::MessagingService;
 use crate::pb_dm::performance_service_server::PerformanceService;
 use crate::pb_dm::remote_config_service_server::RemoteConfigService;
 use crate::pb_dm::{
     Ack, FetchConfigRequest, FetchConfigResponse, RegisterDeviceRequest, RegisterDeviceResponse,
-    UnregisterDeviceRequest, UpdateTopicSubscriptionRequest, UploadCrashReportsRequest, UploadPerformanceRequest,
+    UnregisterDeviceRequest, UpdateTopicSubscriptionRequest, UploadCrashReportsRequest, UploadEventsRequest, UploadEventsResponse,
+    UploadPerformanceRequest,
 };
 
 pub struct DmSvc(pub AppState);
 
 fn split<T>(request: Request<T>) -> (RequestMeta, T) {
     (RequestMeta::from_metadata(request.metadata()), request.into_inner())
+}
+
+#[tonic::async_trait]
+impl AnalyticsService for DmSvc {
+    async fn upload_events(&self, request: Request<UploadEventsRequest>) -> Result<Response<UploadEventsResponse>, Status> {
+        let (meta, message) = split(request);
+        analytics::upload_events(&self.0, &meta, message).await.map(Response::new)
+    }
 }
 
 #[tonic::async_trait]

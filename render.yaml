@@ -67,6 +67,14 @@ services:
       - key: DM_RETENTION_DAYS
         value: "90"
 
+      # Analytics tables (GA4 BigQuery layout): property time zone, currency, USD rates.
+      - key: DM_ANALYTICS_TIMEZONE
+        value: "Asia/Kolkata"
+      - key: DM_ANALYTICS_CURRENCY
+        value: "INR"
+      - key: DM_USD_RATES
+        value: "INR:0.012"
+
       # Optional: Slack-compatible webhook for new-issue / regression / velocity crash alerts.
       - key: DM_ALERT_WEBHOOK_URL
         sync: false

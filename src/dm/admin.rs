@@ -66,6 +66,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/analytics/:app_id/screens", get(analytics::screens))
         .route("/analytics/:app_id/stream", get(analytics::stream))
         .route("/analytics/:app_id/users/:installation_id", get(analytics::user_detail))
+        .route("/analytics/:app_id/tables", get(super::analytics::export::tables))
+        .route("/analytics/:app_id/tables/:table", get(super::analytics::export::rows))
+        .route("/analytics/:app_id/tables/:table/export", get(super::analytics::export::export))
+        .route("/analytics/:app_id/migrate-legacy", post(super::analytics::export::migrate_legacy))
+        .route("/analytics/schema/:kind", get(super::analytics::export::schema))
         .route("/crashlytics/:app_id/trend", get(analytics::crashlytics_trend))
         .route("/crashlytics/issues/:issue_id/trend", get(analytics::issue_trend))
         .route("/crashlytics/reports/:report_id", get(analytics::report_detail))
@@ -790,20 +795,13 @@ pub(super) fn since(days: Option<i64>) -> DateTime {
 /// per app version, over the window.
 async fn stability(State(state): State<AppState>, Path(app_id): Path<String>, Query(query): Query<DaysQuery>) -> ApiResult {
     let from = since(query.days);
-    let sessions_pipeline = vec![
-        doc! { "$match": { "app_id": &app_id, "received_at": { "$gte": from }, "events.name": "session_start" } },
-        doc! { "$unwind": "$events" },
-        doc! { "$match": { "events.name": "session_start" } },
-        doc! { "$group": { "_id": { "v": "$app.version_name", "i": "$installation_id" }, "sessions": { "$sum": 1 } } },
-        doc! { "$group": { "_id": "$_id.v", "sessions": { "$sum": "$sessions" }, "users": { "$sum": 1 } } },
-    ];
     let crashes_pipeline = vec![
         doc! { "$match": { "app_id": &app_id, "is_fatal": true, "kind": { "$in": ["signal", "exception"] }, "timestamp": { "$gte": from } } },
         doc! { "$group": { "_id": { "v": "$app_version", "i": "$installation_id" }, "launches": { "$addToSet": "$launch_id" }, "crashes": { "$sum": 1 } } },
         doc! { "$group": { "_id": "$_id.v", "crashed_sessions": { "$sum": { "$size": "$launches" } }, "crashed_users": { "$sum": 1 }, "crashes": { "$sum": "$crashes" } } },
     ];
 
-    let sessions: Vec<Document> = state.db.event_data.aggregate(sessions_pipeline).await.map_err(db_error)?.try_collect().await.map_err(db_error)?;
+    let sessions: Vec<Document> = analytics::sessions_by_version(&state, &app_id, from).await?;
     let crashes: Vec<Document> = state.db.crash_reports.aggregate(crashes_pipeline).await.map_err(db_error)?.try_collect().await.map_err(db_error)?;
 
     let number = |d: &Document, k: &str| -> f64 {

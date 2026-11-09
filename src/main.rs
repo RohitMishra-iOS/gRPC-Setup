@@ -46,6 +46,7 @@ use crate::db::Db;
 use crate::dm::services::DmSvc;
 use crate::dm::AppState;
 use crate::pb::status_service_server::StatusServiceServer;
+use crate::pb_dm::analytics_service_server::AnalyticsServiceServer;
 use crate::pb_dm::crashlytics_service_server::CrashlyticsServiceServer;
 use crate::pb_dm::messaging_service_server::MessagingServiceServer;
 use crate::pb_dm::performance_service_server::PerformanceServiceServer;
@@ -65,6 +66,14 @@ fn log_config(config: &Config) {
     } else {
         println!("⚠️  DM_API_KEYS unset   → DM_ALLOW_UNAUTHENTICATED=true: NO API key checks (local development only)");
     }
+    let analytics = &config.analytics;
+    println!(
+        "✅  Analytics tables    → analytics_<app>.events_YYYYMMDD (GA4 layout), tz {}, currency {}{}{}",
+        analytics.timezone.name(),
+        analytics.currency,
+        if analytics.trust_geo_headers { ", geo from CDN headers" } else { "" },
+        if config.analytics_retention_days > 0 { format!(", keep {} days", config.analytics_retention_days) } else { String::new() },
+    );
     println!(
         "{}  Admin API           → {}",
         if config.admin_key.is_some() { "✅" } else { "⚠️ " },
@@ -138,6 +147,7 @@ async fn run() -> Result<(), BoxError> {
         println!("⚠️  DM_TOKEN_SECRET unset → random per-process secret (sessions end on restart)");
     }
     platform::database::start_change_stream(state.clone());
+    dm::analytics::tables::spawn_retention(db.clone(), state.config.analytics_retention_days, state.config.analytics.timezone);
 
     // ── 1. gRPC Server ───────────────────────────────────────────────────────
     let grpc_listener = bind(&grpc_host, grpc_port, "GRPC_PORT").await?;
@@ -145,7 +155,8 @@ async fn run() -> Result<(), BoxError> {
     let grpc_server = Server::builder()
         .http2_keepalive_interval(Some(Duration::from_secs(10)))
         .http2_keepalive_timeout(Some(Duration::from_secs(5)))
-        .add_service(StatusServiceServer::new(grpc::StatusSvc { db: db.clone() }))
+        .add_service(StatusServiceServer::new(grpc::StatusSvc { state: state.clone() }))
+        .add_service(AnalyticsServiceServer::new(DmSvc(state.clone())).max_decoding_message_size(MAX_MESSAGE_BYTES))
         .add_service(CrashlyticsServiceServer::new(DmSvc(state.clone())).max_decoding_message_size(MAX_MESSAGE_BYTES))
         .add_service(RemoteConfigServiceServer::new(DmSvc(state.clone())))
         .add_service(PerformanceServiceServer::new(DmSvc(state.clone())).max_decoding_message_size(MAX_MESSAGE_BYTES))

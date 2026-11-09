@@ -3,7 +3,8 @@
 //! gRPC-Web requests are decoded and dispatched straight to the service handlers in-process —
 //! no HTTP/2 hop to the internal gRPC port is needed.
 //!
-//!   POST /status.StatusService/CheckStatus                    analytics batches (1.x, unchanged)
+//!   POST /dm.sdk.v1.AnalyticsService/UploadEvents             analytics (GA4 layout)
+//!   POST /status.StatusService/CheckStatus                    analytics batches from SDK builds before 2.1
 //!   POST /dm.sdk.v1.CrashlyticsService/UploadCrashReports
 //!   POST /dm.sdk.v1.RemoteConfigService/FetchConfig
 //!   POST /dm.sdk.v1.PerformanceService/UploadPerformance
@@ -129,7 +130,8 @@ async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri,
         if let Err(message) = events_key_check(&state, &headers, app_id.as_deref().unwrap_or("")) {
             return json_response(StatusCode::UNAUTHORIZED, json!({ "status_code": 401, "accepted": false, "error": message }));
         }
-        let (code, payload) = events::process_events_json(&state.db, &text).await;
+        let meta = RequestMeta::from_headers(&headers);
+        let (code, payload) = events::process_events_json(&state, &meta, &text).await;
         if code == 200 {
             println!("[Events] ✓ batch_id={} events={}", events::batch_id_label(&payload), events::events_len(&payload));
         }
@@ -174,8 +176,9 @@ where
 }
 
 pub async fn dispatch(state: &AppState, meta: &RequestMeta, path: &str, message: &[u8]) -> Result<Vec<u8>, Status> {
-    use dm::{crashlytics, messaging, performance, remote_config};
+    use dm::{analytics, crashlytics, messaging, performance, remote_config};
     match path {
+        "/dm.sdk.v1.AnalyticsService/UploadEvents" => call(message, |r| analytics::upload_events(state, meta, r)).await,
         "/dm.sdk.v1.CrashlyticsService/UploadCrashReports" => {
             call(message, |r| crashlytics::upload_crash_reports(state, meta, r)).await
         }
@@ -208,7 +211,7 @@ async fn handle_grpc_web(state: &AppState, meta: &RequestMeta, path: &str, body:
         // 1.x behaviour kept exactly: decode failures are INTERNAL, app-level errors live in the
         // response's own code field.
         match StatusRequest::decode(message) {
-            Ok(request) => Ok(grpc::check_status(&state.db, request).await.encode_to_vec()),
+            Ok(request) => Ok(grpc::check_status(state, meta, request).await.encode_to_vec()),
             Err(err) => Err(Status::internal(format!("Failed to parse request: {err}"))),
         }
     } else {

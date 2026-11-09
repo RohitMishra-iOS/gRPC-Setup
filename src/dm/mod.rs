@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod admin_analytics;
+pub mod analytics;
 pub mod alerts;
 pub mod apns;
 pub mod conditions;
@@ -73,12 +74,39 @@ impl AppState {
     }
 }
 
-/// The headers the iOS SDK sends with every call (DMGrpcWebClient).
+/// The headers the iOS SDK sends with every call (DMGrpcWebClient), plus the visitor-location
+/// headers a CDN may add (used for analytics geo only when DM_TRUST_GEO_HEADERS=true, TBL-006).
 #[derive(Clone, Debug, Default)]
 pub struct RequestMeta {
     pub api_key: Option<String>,
     pub app_id: Option<String>,
     pub installation_id: Option<String>,
+    pub geo: GeoHeaders,
+}
+
+/// Cloudflare visitor location headers (cf-ipcountry, cf-ipcity, cf-region, cf-ipcontinent,
+/// cf-metro-code).
+#[derive(Clone, Debug, Default)]
+pub struct GeoHeaders {
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub continent: Option<String>,
+    pub metro: Option<String>,
+}
+
+impl GeoHeaders {
+    fn read(get: impl Fn(&str) -> Option<String>) -> Self {
+        // "XX" / "T1" are Cloudflare's unknown / Tor values.
+        let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s.len() <= 128 && s != "XX" && s != "T1");
+        Self {
+            country: clean(get("cf-ipcountry")),
+            city: clean(get("cf-ipcity")),
+            region: clean(get("cf-region")),
+            continent: clean(get("cf-ipcontinent")),
+            metro: clean(get("cf-metro-code")),
+        }
+    }
 }
 
 impl RequestMeta {
@@ -88,6 +116,7 @@ impl RequestMeta {
             api_key: get("x-api-key"),
             app_id: get("x-dm-app-id"),
             installation_id: get("x-dm-installation-id"),
+            geo: GeoHeaders::read(get),
         }
     }
 
@@ -97,6 +126,7 @@ impl RequestMeta {
             api_key: get("x-api-key"),
             app_id: get("x-dm-app-id"),
             installation_id: get("x-dm-installation-id"),
+            geo: GeoHeaders::read(get),
         }
     }
 }
