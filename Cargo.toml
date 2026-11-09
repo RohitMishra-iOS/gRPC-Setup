@@ -1,6 +1,6 @@
 [package]
 name = "grpc-status-server"
-version = "3.0.0"
+version = "3.2.0"
 edition = "2021"
 description = "DM platform backend: analytics, crashlytics, remote config, performance, messaging, installations, app check, auth, storage, functions, realtime database"
 
