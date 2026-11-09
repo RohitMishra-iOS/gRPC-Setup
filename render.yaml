@@ -52,8 +52,10 @@ services:
         value: "grpc_status"
 
       # ── DM SDK 2.0 (Crashlytics / Remote Config / Performance / Messaging) ──
-      # API keys the iOS SDK sends as x-api-key. Comma-separated; "app_id:key" scopes a key to
-      # one app. Leave unset only for local development (calls are then unauthenticated).
+      # REQUIRED. API keys the apps send as x-api-key, comma-separated; "app_id:key" scopes a key
+      # to one app, e.g. dmart-ready:dm_app_…,dmart-ready-ios:dm_app_…  Enter it in the Render
+      # dashboard (Environment). Without it the server refuses to start; requests with a missing or
+      # wrong key are rejected with 401.
       - key: DM_API_KEYS
         sync: false
 
@@ -64,6 +66,14 @@ services:
       # Days to keep crash / performance / push documents (TTL). 0 = forever.
       - key: DM_RETENTION_DAYS
         value: "90"
+
+      # Analytics tables (GA4 BigQuery layout): property time zone, currency, USD rates.
+      - key: DM_ANALYTICS_TIMEZONE
+        value: "Asia/Kolkata"
+      - key: DM_ANALYTICS_CURRENCY
+        value: "INR"
+      - key: DM_USD_RATES
+        value: "INR:0.012"
 
       # Optional: Slack-compatible webhook for new-issue / regression / velocity crash alerts.
       - key: DM_ALERT_WEBHOOK_URL

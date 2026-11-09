@@ -1,7 +1,8 @@
 syntax = "proto3";
 
-// Backend contract for the DM SDK's Crashlytics, Remote Config, Performance and Messaging
-// modules. (Analytics keeps using status.StatusService/CheckStatus, unchanged.)
+// Backend contract for the DM SDK's Analytics, Crashlytics, Remote Config, Performance and
+// Messaging modules. (status.StatusService/CheckStatus and POST /events stay for SDK builds before
+// 2.1; the server stores them in the same tables as AnalyticsService.)
 //
 // Transport: gRPC-Web over HTTP/1.1 (application/grpc-web+proto), same as CheckStatus — the client
 // is DMGrpcWebClient in this folder. Every request carries these headers:
@@ -274,4 +275,114 @@ message UpdateTopicSubscriptionRequest {
 message UnregisterDeviceRequest {
   ClientContext context = 1;
   string registration_token = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Analytics — the GA4 / Firebase BigQuery export shape (dm-specs ANA-010, TBL-*)
+// ---------------------------------------------------------------------------------------------
+
+service AnalyticsService {
+  // Up to 500 events per call. Idempotent on batch_id: a retry is answered with duplicate = true
+  // and stores nothing. Remove queued events only when accepted is true.
+  rpc UploadEvents(UploadEventsRequest) returns (UploadEventsResponse);
+}
+
+// A typed value: exactly one field is set, like BigQuery's event_params.value record.
+message AnalyticsValue {
+  oneof value {
+    string string_value = 1;
+    int64 int_value = 2;
+    float float_value = 3;
+    double double_value = 4;
+  }
+}
+
+// event_params / item_params entry.
+message AnalyticsParam {
+  string key = 1;
+  AnalyticsValue value = 2;
+}
+
+message AnalyticsUserProperty {
+  string key = 1;
+  AnalyticsValue value = 2;
+  int64 set_timestamp_micros = 3;   // when the app last set it
+}
+
+// One entry of the GA4 "items" array, as the app logged it (item_id, item_name, price, quantity, …
+// and custom keys). The server maps known keys to the item columns and keeps the rest in item_params.
+message AnalyticsItem {
+  repeated AnalyticsParam params = 1;
+}
+
+message AnalyticsEvent {
+  string name = 1;
+  int64 timestamp_micros = 2;           // client time, µs since the epoch (UTC)
+  int64 previous_timestamp_micros = 3;  // last time this event name was logged on the device, 0 = never
+  repeated AnalyticsParam params = 4;
+  repeated AnalyticsItem items = 5;
+}
+
+// The GA4 "device" record (web fields only from the JS SDK).
+message AnalyticsDevice {
+  string category = 1;                  // mobile | tablet | desktop
+  string mobile_brand_name = 2;         // Apple
+  string mobile_model_name = 3;         // iPhone
+  string mobile_marketing_name = 4;     // iPhone 15 Pro (empty: the server fills it for Apple models)
+  string mobile_os_hardware_model = 5;  // iPhone16,2
+  string operating_system = 6;          // iOS | iPadOS | Android | Windows | macOS | …
+  string operating_system_version = 7;  // 18.1
+  string vendor_id = 8;                 // IDFV
+  string advertising_id = 9;            // IDFA / AAID, only when the app provides it
+  string language = 10;                 // en-in
+  string is_limited_ad_tracking = 11;   // Yes | No
+  int64 time_zone_offset_seconds = 12;
+  string browser = 13;
+  string browser_version = 14;
+  string hostname = 15;
+}
+
+message AnalyticsAppInfo {
+  string id = 1;              // bundle id / package name
+  string version = 2;
+  string install_store = 3;
+  string install_source = 4;
+}
+
+// Consent as GA4 exports it: "Yes" | "No" | "" (never set).
+message AnalyticsPrivacyInfo {
+  string analytics_storage = 1;
+  string ads_storage = 2;
+  string uses_transient_token = 3;
+}
+
+message UploadEventsRequest {
+  ClientContext context = 1;
+  string batch_id = 2;                           // idempotency key
+  int64 bundle_sequence_id = 3;                  // +1 per upload attempt
+  int64 upload_timestamp_micros = 4;             // device clock at send time
+  string user_id = 5;
+  string user_pseudo_id = 6;                     // app instance id
+  int64 user_first_touch_timestamp_micros = 7;
+  repeated AnalyticsUserProperty user_properties = 8;
+  AnalyticsDevice device = 9;
+  AnalyticsAppInfo app_info = 10;
+  AnalyticsPrivacyInfo privacy_info = 11;
+  bool debug = 12;                               // DebugView
+  int64 page_id = 13;                            // web: id of the page load
+  repeated AnalyticsEvent events = 14;
+}
+
+message RejectedEvent {
+  int32 index = 1;
+  string name = 2;
+  repeated string errors = 3;
+}
+
+message UploadEventsResponse {
+  bool accepted = 1;                     // false: not stored, keep the events and retry
+  bool duplicate = 2;                    // this batch_id was stored before
+  int32 stored_events = 3;
+  repeated RejectedEvent rejected_events = 4;
+  repeated string warnings = 5;          // dropped parameters / user properties
 }

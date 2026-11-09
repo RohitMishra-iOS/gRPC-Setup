@@ -1304,6 +1304,7 @@ pub fn start_change_stream(state: AppState) {
 mod tests {
     use super::*;
 
+    // spec: DB-006
     #[test]
     fn paths() {
         assert_eq!(document_path("users/u1").unwrap(), ("users/u1".into(), "users".into(), "users".into()));
@@ -1314,6 +1315,7 @@ mod tests {
         assert_eq!(auto_id().len(), 20);
     }
 
+    // spec: DB-001
     #[test]
     fn typed_values_round_trip() {
         let value = json!({ "t": { "__type": "timestamp", "value": "2026-10-29T10:00:00Z" }, "b": { "__type": "bytes", "base64": "AQI=" },
@@ -1328,6 +1330,7 @@ mod tests {
         assert!(to_bson(&json!({ "x": [[1]] })).is_err());
     }
 
+    // spec: DB-002
     #[test]
     fn set_update_and_transforms() {
         let now = DateTime::from_millis(1_800_000_000_000);
@@ -1349,6 +1352,7 @@ mod tests {
         assert!(plan(&w("update", json!({ "a": 1 }), false), None, now).is_err(), "update needs an existing doc");
     }
 
+    // spec: DB-004
     #[test]
     fn cursors() {
         let order = vec![("data.score".to_string(), true), ("_id".to_string(), true)];

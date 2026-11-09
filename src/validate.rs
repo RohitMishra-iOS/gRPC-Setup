@@ -368,6 +368,7 @@ pub const PLATFORMS: &[&str] = &["ios", "android", "web", "jvm", "macos", "tvos"
 mod tests {
     use super::*;
 
+    // spec: AUT-003
     #[test]
     fn emails() {
         for good in ["a@b.co", "rohit.k+tag@dmart.in", "x_y@mail.example.com", "राहुल@उदाहरण.भारत"] {
@@ -378,6 +379,7 @@ mod tests {
         }
     }
 
+    // spec: AUT-005
     #[test]
     fn urls() {
         assert!(is_url("https://dmart.in/x?y#z", true));
@@ -389,6 +391,7 @@ mod tests {
         assert_eq!(url_host("https://user@Shop.DMart.in:443/p").as_deref(), Some("shop.dmart.in"));
     }
 
+    // spec: ERR-002
     #[test]
     fn collects_violations() {
         let mut v = V::new();
@@ -402,6 +405,7 @@ mod tests {
         assert!(V::new().into_status().is_ok());
     }
 
+    // spec: KEY-005
     #[test]
     fn names_and_ids() {
         assert!(is_analytics_name("add_to_cart", 40));

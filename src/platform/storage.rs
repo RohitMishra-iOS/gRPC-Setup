@@ -397,6 +397,7 @@ pub async fn upload(State(state): State<AppState>, Path(bucket): Path<String>, Q
 }
 
 pub async fn resumable(State(state): State<AppState>, Path(session): Path<String>, headers: HeaderMap, body: Bytes) -> ApiResult {
+    super::require_api_key(&state, &headers, None)?;
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
     let command = header("x-goog-upload-command");
     let uploads = state.db.coll(UPLOADS);
@@ -782,12 +783,14 @@ fn md5_compute(input: &[u8]) -> [u8; 16] {
 mod tests {
     use super::*;
 
+    // spec: STO-003
     #[test]
     fn md5_matches_known_vectors() {
         assert_eq!(hex::encode(md5_compute(b"")), "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(hex::encode(md5_compute(b"The quick brown fox jumps over the lazy dog")), "9e107d9d372bb6826bd81d3542a419d6");
     }
 
+    // spec: STO-002
     #[test]
     fn ranges() {
         assert_eq!(parse_range("bytes=0-9", 100), Some((0, 9)));
@@ -796,6 +799,7 @@ mod tests {
         assert_eq!(parse_range("bytes=100-", 100), None);
     }
 
+    // spec: STO-001
     #[test]
     fn multipart_related() {
         let body = b"--b1\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"name\":\"a/b.txt\",\"metadata\":{\"k\":\"v\"}}\r\n--b1\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b1--\r\n";
@@ -805,6 +809,7 @@ mod tests {
         assert_eq!(ctype.as_deref(), Some("text/plain"));
     }
 
+    // spec: STO-004
     #[test]
     fn names() {
         assert!(valid_name("users/u1/a.png").is_ok());

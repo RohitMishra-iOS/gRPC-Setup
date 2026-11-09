@@ -292,12 +292,14 @@ mod tests {
         }
     }
 
+    // spec: RC-004
     #[test]
     fn versions_compare_numerically() {
         assert!(evaluate(&json!({"app_version": {"gte": "2.9.1"}}), &ctx()).unwrap());
         assert!(!evaluate(&json!({"app_version": {"lt": "2.10"}}), &ctx()).unwrap());
     }
 
+    // spec: RC-004
     #[test]
     fn combinators_and_case_insensitive_fields() {
         let c = json!({"all": [
@@ -312,6 +314,7 @@ mod tests {
         assert!(evaluate(&json!({"user_property": {"name": "missing", "exists": false}}), &ctx()).unwrap());
     }
 
+    // spec: RC-004
     #[test]
     fn percent_is_stable_and_bounded() {
         let a = percent_bucket("beta", "install-1");
@@ -321,12 +324,14 @@ mod tests {
         assert!(below);
     }
 
+    // spec: RC-004
     #[test]
     fn time_windows() {
         assert!(evaluate(&json!({"time": {"after": "2026-01-01T00:00:00Z"}}), &ctx()).unwrap());
         assert!(!evaluate(&json!({"time": {"before": "2026-01-01T00:00:00Z"}}), &ctx()).unwrap());
     }
 
+    // spec: RC-005
     #[test]
     fn validation_rejects_bad_expressions() {
         assert!(validate(&json!({"app_versio": {"eq": "1"}})).is_err());

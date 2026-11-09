@@ -368,7 +368,8 @@ pub async fn accounts(State(state): State<AppState>, Path(action): Path<String>,
     }
 }
 
-pub async fn public_config(State(state): State<AppState>) -> ApiResult {
+pub async fn public_config(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    super::require_api_key(&state, &headers, None)?;
     let p = &state.config.platform;
     ok(json!({
         "anonymous": p.auth_allow_anonymous,

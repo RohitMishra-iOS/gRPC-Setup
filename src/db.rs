@@ -8,7 +8,12 @@
 //! mongosh, for creating it ahead of the first deploy.
 //!
 //! Collections (database = MONGODB_DB_NAME, default "grpc_status"):
-//!   event_data      analytics batches (unchanged from 1.x: one document per batch)
+//!   event_data      analytics batches stored by server versions before 3.2 (read by
+//!                   POST /admin/analytics/:app/migrate-legacy; nothing new is written here)
+//!   analytics_<app>.events_YYYYMMDD / pseudonymous_users_YYYYMMDD / users_YYYYMMDD
+//!                   analytics in the GA4 BigQuery export layout (dm/analytics, dm-specs TBL-*)
+//!   analytics_users one profile per (app_id, installation_id): lifetime values for user_ltv,
+//!                   first traffic source, last click
 //!   crash_reports   one document per crash / non-fatal (_id = report id → idempotent uploads)
 //!   crash_issues    reports grouped by signature (_id = issue id): counts, versions, status
 //!   perf_records    one document per performance record (_id = record id)
@@ -18,11 +23,10 @@
 //!   push_messages   log of messages sent through the admin API
 //!   dsyms.files / dsyms.chunks   GridFS storage for dSYM DWARF binaries
 
-use mongodb::bson::{self, doc, Bson, DateTime, Document};
+use mongodb::bson::{doc, DateTime, Document};
 use mongodb::gridfs::GridFsBucket;
 use mongodb::options::{GridFsBucketOptions, IndexOptions};
 use mongodb::{Client, Collection, Database, IndexModel};
-use serde_json::Value as Json;
 
 use crate::BoxError;
 
@@ -55,6 +59,8 @@ pub struct Db {
     pub analytics_users: Collection<Document>,
     pub symbol_files: Collection<Document>,
     pub push_messages: Collection<Document>,
+    /// Analytics tables whose indexes this process has ensured (dm/analytics/tables.rs).
+    pub analytics_tables: crate::dm::analytics::tables::Ensured,
 }
 
 impl Db {
@@ -84,6 +90,7 @@ impl Db {
             analytics_users: database.collection(ANALYTICS_USERS),
             symbol_files: database.collection(SYMBOL_FILES),
             push_messages: database.collection(PUSH_MESSAGES),
+            analytics_tables: Default::default(),
             database,
         }
     }
@@ -153,29 +160,16 @@ impl Db {
         ttl(&self.database, &self.crash_reports, retention_days).await;
         ttl(&self.database, &self.perf_records, retention_days).await;
         ttl(&self.database, &self.push_messages, retention_days).await;
-        // Analytics data predates 2.0 and may be wanted forever: separate setting, default off.
+        // Analytics retention drops whole daily tables instead (dm/analytics/tables.rs); the old
+        // batch collection keeps its TTL setting.
         ttl(&self.database, &self.event_data, analytics_retention_days).await;
         crate::platform::ensure_schema(self).await?;
         Ok(())
     }
 
-    /// Inserts the whole incoming analytics JSON object as a single document (1.x behaviour).
-    /// With analytics_storage consent denied, identifiers are stripped (cookieless ping).
-    pub async fn save_event_batch(&self, obj: &Json) -> Result<(), BoxError> {
-        let mut doc = bson::to_document(&anonymize_if_denied(obj))?;
-        doc.insert("received_at", DateTime::now());
-        if !doc.contains_key("debug") {
-            doc.insert("debug", false);
-        }
-        self.event_data.insert_one(doc).await?;
-        Ok(())
-    }
-
-    /// Records the batch id. Ok(false) = already stored (a retry). Batches without an id are
-    /// always accepted (1.x clients).
-    pub async fn claim_batch(&self, obj: &Json) -> Result<bool, BoxError> {
-        let Some(batch_id) = batch_id(obj) else { return Ok(true) };
-        let ledger = doc! { "_id": batch_id, "app_id": obj.get("app_id").and_then(Json::as_str), "received_at": DateTime::now() };
+    /// Records an analytics batch id. Ok(false) = already stored (a retry, WIRE-005).
+    pub async fn claim_batch_id(&self, app_id: &str, batch_id: &str) -> Result<bool, BoxError> {
+        let ledger = doc! { "_id": batch_id, "app_id": app_id, "received_at": DateTime::now() };
         match self.analytics_batches.insert_one(ledger).await {
             Ok(_) => Ok(true),
             Err(err) if crate::db::is_duplicate_key(&err) => Ok(false),
@@ -183,52 +177,9 @@ impl Db {
         }
     }
 
-    /// Undo `claim_batch` after a failed save, so the client's retry is stored.
-    pub async fn release_batch(&self, obj: &Json) {
-        if let Some(batch_id) = batch_id(obj) {
-            let _ = self.analytics_batches.delete_one(doc! { "_id": batch_id }).await;
-        }
-    }
-
-    /// Keeps one document per app instance up to date (Firebase's per-user rollup).
-    pub async fn upsert_analytics_user(&self, obj: &Json) -> Result<(), BoxError> {
-        if consent_denied(obj) {
-            return Ok(());
-        }
-        let installation = obj.get("installation_id").or_else(|| obj.get("instance_id")).and_then(Json::as_str);
-        let Some(installation) = installation.filter(|s| !s.is_empty()) else { return Ok(()) };
-        let app_id = obj.get("app_id").and_then(Json::as_str).unwrap_or("");
-        let events = obj.get("events").and_then(Json::as_array).cloned().unwrap_or_default();
-        let last_event_ms = events.iter().filter_map(|e| e.get("timestamp_ms").and_then(Json::as_i64)).max();
-        let last_session = events
-            .iter()
-            .filter(|e| e.get("timestamp_ms").and_then(Json::as_i64) == last_event_ms)
-            .find_map(|e| e.get("session_id").cloned());
-        let event_count = events.len() as i64;
-
-        let mut set = doc! { "last_seen": DateTime::now(), "app_id": app_id, "installation_id": installation };
-        let to_bson = |v: &Json| bson::to_bson(v).unwrap_or(Bson::Null);
-        for (field, key) in [("user_id", "user_id"), ("user_properties", "user_properties"), ("app", "app"), ("device", "device"), ("consent", "consent")] {
-            if let Some(value) = obj.get(key) {
-                set.insert(field, to_bson(value));
-            }
-        }
-        if let Some(ms) = last_event_ms {
-            set.insert("last_event_at", DateTime::from_millis(ms));
-        }
-        if let Some(session) = last_session {
-            set.insert("last_session_id", to_bson(&session));
-        }
-        let update = doc! {
-            "$set": set,
-            "$setOnInsert": { "first_seen": DateTime::now() },
-            "$inc": { "event_count": event_count, "batch_count": 1_i64 },
-        };
-        self.analytics_users
-            .update_one(doc! { "app_id": app_id, "installation_id": installation }, update)
-            .upsert(true)
-            .await?;
-        Ok(())
+    /// Undo `claim_batch_id` after a failed save, so the client's retry is stored.
+    pub async fn release_batch_id(&self, batch_id: &str) {
+        let _ = self.analytics_batches.delete_one(doc! { "_id": batch_id }).await;
     }
 }
 
@@ -292,31 +243,4 @@ pub fn hex_addr(address: u64) -> String {
 
 pub fn ms_to_datetime(ms: i64) -> DateTime {
     DateTime::from_millis(ms)
-}
-
-fn batch_id(obj: &Json) -> Option<String> {
-    match obj.get("batch_id") {
-        Some(Json::String(s)) if !s.is_empty() => Some(s.clone()),
-        Some(Json::Number(n)) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-/// consent.analytics_storage == "denied" (Consent Mode): store events without identifiers.
-pub fn consent_denied(obj: &Json) -> bool {
-    obj.get("consent").and_then(|c| c.get("analytics_storage")).and_then(Json::as_str) == Some("denied")
-}
-
-fn anonymize_if_denied(obj: &Json) -> Json {
-    if !consent_denied(obj) {
-        return obj.clone();
-    }
-    let mut copy = obj.clone();
-    if let Some(map) = copy.as_object_mut() {
-        for key in ["instance_id", "installation_id", "user_id", "user_properties"] {
-            map.remove(key);
-        }
-        map.insert("cookieless".into(), Json::Bool(true));
-    }
-    copy
 }

@@ -25,8 +25,10 @@ pub struct Config {
     /// Raw crash/performance/analytics documents are deleted after this many days (TTL index).
     /// 0 = keep forever.
     pub retention_days: u32,
-    /// Same for analytics batches (event_data). Default 0 — 1.x data is kept forever.
+    /// Analytics: daily tables older than this many days are dropped (0 = keep forever).
     pub analytics_retention_days: u32,
+    /// Analytics tables settings (GA4 export layout, dm-specs TBL-*).
+    pub analytics: AnalyticsConfig,
     /// Remote Config fetches allowed per installation per hour (app-initiated / real-time).
     pub rc_fetches_per_hour: u32,
     pub rc_realtime_checks_per_hour: u32,
@@ -43,10 +45,88 @@ pub struct Config {
     pub dsym_cache_dir: std::path::PathBuf,
     /// Platform services (Installations, App Check, Auth, Storage, Functions, Database).
     pub platform: PlatformConfig,
-    /// Reject /events and CheckStatus batches without a valid API key. On by default whenever
-    /// DM_API_KEYS is set; DM_EVENTS_REQUIRE_API_KEY=false lets keyless batches from old iOS builds
-    /// through during a migration. A key that *is* sent is always checked against the batch's app_id.
+    /// Reject /events and CheckStatus batches without a valid API key (DM_EVENTS_REQUIRE_API_KEY).
+    /// Off by default so 1.x iOS builds (which send no key) keep working; a key that *is* sent is
+    /// always checked against the batch's app_id.
+    /// Events (/events, CheckStatus) without an x-api-key are rejected. Default true; set
+    /// DM_EVENTS_REQUIRE_API_KEY=false only while old app versions that send no key are still live
+    /// (a key that *is* sent is always checked).
     pub events_require_api_key: bool,
+    /// DM_ALLOW_UNAUTHENTICATED=true: run without DM_API_KEYS (no key checks at all). Local
+    /// development only; without it the server refuses to start when DM_API_KEYS is unset.
+    pub allow_unauthenticated: bool,
+}
+
+/// Settings of the GA4-layout analytics tables (dm-specs 15-analytics-tables).
+#[derive(Clone, Debug)]
+pub struct AnalyticsConfig {
+    /// Property time zone for event_date and the daily table suffix (DM_ANALYTICS_TIMEZONE).
+    pub timezone: chrono_tz::Tz,
+    pub timezone_problem: Option<String>,
+    /// Property currency for user_ltv (DM_ANALYTICS_CURRENCY, ISO 4217, default USD).
+    pub currency: String,
+    /// USD per unit of each currency for *_in_usd fields (DM_USD_RATES=INR:0.012,EUR:1.08).
+    pub usd_rates: std::collections::HashMap<String, f64>,
+    pub usd_rates_problems: Vec<String>,
+    /// Fill geo from CDN headers (cf-ipcountry, …). Only behind a CDN that sets them; a client
+    /// could forge them otherwise (DM_TRUST_GEO_HEADERS).
+    pub trust_geo_headers: bool,
+    /// Write pseudonymous_users_YYYYMMDD / users_YYYYMMDD (DM_ANALYTICS_USER_TABLES, default true).
+    pub user_tables: bool,
+}
+
+impl AnalyticsConfig {
+    pub fn from_env() -> Self {
+        let (timezone, timezone_problem) = match env_nonempty("DM_ANALYTICS_TIMEZONE") {
+            None => (chrono_tz::UTC, None),
+            Some(name) => match name.parse::<chrono_tz::Tz>() {
+                Ok(tz) => (tz, None),
+                Err(_) => (chrono_tz::UTC, Some(format!("DM_ANALYTICS_TIMEZONE: '{name}' is not an IANA time zone (e.g. Asia/Kolkata)"))),
+            },
+        };
+        let mut usd_rates = std::collections::HashMap::from([("USD".to_string(), 1.0)]);
+        let mut usd_rates_problems = Vec::new();
+        for entry in env_nonempty("DM_USD_RATES").unwrap_or_default().split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            match entry.split_once(':').map(|(c, r)| (c.trim().to_ascii_uppercase(), r.trim().parse::<f64>())) {
+                Some((code, Ok(rate))) if is_currency(&code) && rate.is_finite() && rate > 0.0 => {
+                    usd_rates.insert(code, rate);
+                }
+                _ => usd_rates_problems.push(format!("DM_USD_RATES: '{entry}' must be CODE:rate, e.g. INR:0.012")),
+            }
+        }
+        Self {
+            timezone,
+            timezone_problem,
+            currency: env_nonempty("DM_ANALYTICS_CURRENCY").map(|c| c.to_ascii_uppercase()).unwrap_or_else(|| "USD".into()),
+            usd_rates,
+            usd_rates_problems,
+            trust_geo_headers: env_nonempty("DM_TRUST_GEO_HEADERS").is_some_and(|v| v == "true" || v == "1"),
+            user_tables: !env_nonempty("DM_ANALYTICS_USER_TABLES").is_some_and(|v| v == "false" || v == "0"),
+        }
+    }
+
+    /// Amount in `currency` → USD, when the rate is known.
+    pub fn to_usd(&self, amount: f64, currency: &str) -> Option<f64> {
+        self.usd_rates.get(&currency.to_ascii_uppercase()).map(|rate| round6(amount * rate))
+    }
+
+    /// Amount in `currency` → the property currency, when both rates are known.
+    pub fn to_property_currency(&self, amount: f64, currency: &str) -> Option<f64> {
+        if currency.eq_ignore_ascii_case(&self.currency) {
+            return Some(amount);
+        }
+        let usd = self.to_usd(amount, currency)?;
+        self.usd_rates.get(&self.currency).map(|rate| round6(usd / rate))
+    }
+}
+
+/// ISO 4217 shape: three ASCII letters.
+pub fn is_currency(code: &str) -> bool {
+    code.len() == 3 && code.chars().all(|c| c.is_ascii_alphabetic())
+}
+
+fn round6(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
 }
 
 /// Settings for the /v1 platform services. See README "Platform services".
@@ -116,6 +196,7 @@ impl Config {
             admin_key: env_nonempty("DM_ADMIN_KEY"),
             retention_days: parse_env("DM_RETENTION_DAYS", 90),
             analytics_retention_days: parse_env("DM_ANALYTICS_RETENTION_DAYS", 0),
+            analytics: AnalyticsConfig::from_env(),
             rc_fetches_per_hour: parse_env("DM_RC_FETCHES_PER_HOUR", 30),
             rc_realtime_checks_per_hour: parse_env("DM_RC_REALTIME_CHECKS_PER_HOUR", 120),
             rc_realtime_hold_seconds: parse_env("DM_RC_REALTIME_HOLD_SECONDS", 45),
@@ -127,13 +208,18 @@ impl Config {
                 .map(Into::into)
                 .unwrap_or_else(|| std::env::temp_dir().join("dm-dsym-cache")),
             platform: PlatformConfig::from_env(),
-            events_require_api_key: env_nonempty("DM_EVENTS_REQUIRE_API_KEY").map_or(true, |v| v != "false" && v != "0"),
+            events_require_api_key: !env_nonempty("DM_EVENTS_REQUIRE_API_KEY").is_some_and(|v| v == "false" || v == "0"),
+            allow_unauthenticated: env_nonempty("DM_ALLOW_UNAUTHENTICATED").is_some_and(|v| v == "true" || v == "1"),
         }
     }
 
     /// Configuration problems: (fatal, message). Fatal ones stop the server at startup.
     pub fn problems(&self) -> Vec<(bool, String)> {
         let mut out = Vec::new();
+        if self.api_keys.is_empty() && !self.allow_unauthenticated {
+            out.push((true, "DM_API_KEYS is not set, so every client request would be accepted without an API key. \
+                Set DM_API_KEYS=<app_id>:<key>,… (e.g. dmart-ready:dm_app_…), or DM_ALLOW_UNAUTHENTICATED=true for local development only".to_string()));
+        }
         for (app, key) in &self.api_keys {
             if let Some(app) = app {
                 if !crate::validate::is_safe_id(app) || app.len() > crate::validate::limits::ID {
@@ -143,6 +229,15 @@ impl Config {
             if key.len() < 16 {
                 out.push((false, format!("DM_API_KEYS: the key for '{}' is shorter than 16 characters — use a long random key", app.as_deref().unwrap_or("*"))));
             }
+        }
+        if let Some(problem) = &self.analytics.timezone_problem {
+            out.push((true, problem.clone()));
+        }
+        if !is_currency(&self.analytics.currency) {
+            out.push((true, "DM_ANALYTICS_CURRENCY must be a 3-letter ISO 4217 code, e.g. INR".into()));
+        }
+        for problem in &self.analytics.usd_rates_problems {
+            out.push((true, problem.clone()));
         }
         if let Some(admin) = &self.admin_key {
             if admin.len() < 16 {

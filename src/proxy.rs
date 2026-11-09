@@ -3,7 +3,8 @@
 //! gRPC-Web requests are decoded and dispatched straight to the service handlers in-process —
 //! no HTTP/2 hop to the internal gRPC port is needed.
 //!
-//!   POST /status.StatusService/CheckStatus                    analytics batches (1.x, unchanged)
+//!   POST /dm.sdk.v1.AnalyticsService/UploadEvents             analytics (GA4 layout)
+//!   POST /status.StatusService/CheckStatus                    analytics batches from SDK builds before 2.1
 //!   POST /dm.sdk.v1.CrashlyticsService/UploadCrashReports
 //!   POST /dm.sdk.v1.RemoteConfigService/FetchConfig
 //!   POST /dm.sdk.v1.PerformanceService/UploadPerformance
@@ -65,9 +66,9 @@ async fn cors(State(state): State<AppState>, request: Request, next: Next) -> Re
 }
 
 /// API key check for analytics batches: a key that is sent (x-api-key, or Authorization: Bearer
-/// from the iOS HTTP transport) must be valid for the batch's app, and a missing key is rejected
-/// unless DM_EVENTS_REQUIRE_API_KEY=false.
-pub(crate) fn events_key_check(state: &AppState, headers: &HeaderMap, app_id: &str) -> Result<(), String> {
+/// from the iOS HTTP transport) must be valid for the batch's app; no key is accepted unless
+/// DM_EVENTS_REQUIRE_API_KEY is set.
+fn events_key_check(state: &AppState, headers: &HeaderMap, app_id: &str) -> Result<(), String> {
     if !state.config.auth_enabled() {
         return Ok(());
     }
@@ -129,7 +130,8 @@ async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri,
         if let Err(message) = events_key_check(&state, &headers, app_id.as_deref().unwrap_or("")) {
             return json_response(StatusCode::UNAUTHORIZED, json!({ "status_code": 401, "accepted": false, "error": message }));
         }
-        let (code, payload) = events::process_events_json(&state.db, &text).await;
+        let meta = RequestMeta::from_headers(&headers);
+        let (code, payload) = events::process_events_json(&state, &meta, &text).await;
         if code == 200 {
             println!("[Events] ✓ batch_id={} events={}", events::batch_id_label(&payload), events::events_len(&payload));
         }
@@ -145,7 +147,8 @@ async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri,
         let app_id = StatusRequest::decode(&body[5..(5 + declared).min(body.len())])
             .ok()
             .and_then(|r| r.message.map(|m| grpc::struct_to_json(&m)))
-            .and_then(|j| j.get("app_id").and_then(|a| a.as_str()).map(str::to_string))
+            .and_then(|j| j.get("app_id").and_then(|a| a.as_str()).filter(|a| !a.is_empty()).map(str::to_string))
+            .or_else(|| headers.get("x-dm-app-id").and_then(|v| v.to_str().ok()).map(str::to_string))
             .unwrap_or_default();
         if let Err(message) = events_key_check(&state, &headers, &app_id) {
             return grpc_error_response(Status::unauthenticated(message));
@@ -173,8 +176,9 @@ where
 }
 
 pub async fn dispatch(state: &AppState, meta: &RequestMeta, path: &str, message: &[u8]) -> Result<Vec<u8>, Status> {
-    use dm::{crashlytics, messaging, performance, remote_config};
+    use dm::{analytics, crashlytics, messaging, performance, remote_config};
     match path {
+        "/dm.sdk.v1.AnalyticsService/UploadEvents" => call(message, |r| analytics::upload_events(state, meta, r)).await,
         "/dm.sdk.v1.CrashlyticsService/UploadCrashReports" => {
             call(message, |r| crashlytics::upload_crash_reports(state, meta, r)).await
         }
@@ -207,7 +211,7 @@ async fn handle_grpc_web(state: &AppState, meta: &RequestMeta, path: &str, body:
         // 1.x behaviour kept exactly: decode failures are INTERNAL, app-level errors live in the
         // response's own code field.
         match StatusRequest::decode(message) {
-            Ok(request) => Ok(grpc::check_status(&state.db, request).await.encode_to_vec()),
+            Ok(request) => Ok(grpc::check_status(state, meta, request).await.encode_to_vec()),
             Err(err) => Err(Status::internal(format!("Failed to parse request: {err}"))),
         }
     } else {
@@ -303,6 +307,7 @@ fn set_cors_headers(allowed_origins: &str, req: &HeaderMap, res: &mut HeaderMap)
 mod tests {
     use super::*;
 
+    // spec: WIRE-002
     #[test]
     fn frames_round_trip() {
         let f = frame(0x80, b"grpc-status:0\r\n");
@@ -310,6 +315,7 @@ mod tests {
         assert_eq!(u32::from_be_bytes([f[1], f[2], f[3], f[4]]) as usize, f.len() - 5);
     }
 
+    // spec: WIRE-002
     #[test]
     fn grpc_message_is_percent_encoded() {
         assert_eq!(encode_grpc_message("bad\r\nkey 100%"), "bad%0D%0Akey 100%25");

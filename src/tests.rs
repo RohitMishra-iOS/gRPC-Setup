@@ -11,7 +11,7 @@ use crate::dm::{AppState, RequestMeta};
 use crate::pb_dm::{
     ClientContext, CrashKind, CrashReport, FetchConfigRequest, UpdateTopicSubscriptionRequest, UploadCrashReportsRequest,
 };
-use crate::proxy::{dispatch, events_key_check};
+use crate::proxy::dispatch;
 
 const DEAD_MONGO: &str = "mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=200&connectTimeoutMS=200";
 
@@ -37,6 +37,7 @@ fn fetch(app: &str) -> Vec<u8> {
 
 const FETCH: &str = "/dm.sdk.v1.RemoteConfigService/FetchConfig";
 
+// spec: KEY-001
 #[tokio::test]
 async fn rejects_missing_and_wrong_api_keys() {
     let s = state(100).await;
@@ -46,28 +47,7 @@ async fn rejects_missing_and_wrong_api_keys() {
     assert_eq!(err.code(), Code::Unauthenticated, "app-scoped key must not work for another app");
 }
 
-#[tokio::test]
-async fn analytics_batches_need_a_valid_api_key() {
-    let s = state(100).await;
-    let headers = |key: &str| {
-        let mut h = axum::http::HeaderMap::new();
-        if !key.is_empty() {
-            h.insert("x-api-key", key.parse().unwrap());
-        }
-        h
-    };
-    assert!(events_key_check(&s, &headers(""), "dmart").is_err(), "missing key must be rejected");
-    assert!(events_key_check(&s, &headers("test"), "dmart").is_err(), "wrong key must be rejected");
-    assert!(events_key_check(&s, &headers("key-dmart"), "other-app").is_err());
-    assert!(events_key_check(&s, &headers("key-dmart"), "dmart").is_ok());
-
-    let mut config = s.config.clone();
-    config.events_require_api_key = false;
-    let s = AppState::new(Db::lazy(DEAD_MONGO).await, config).expect("state");
-    assert!(events_key_check(&s, &headers(""), "dmart").is_ok(), "opt-out accepts keyless batches");
-    assert!(events_key_check(&s, &headers("test"), "dmart").is_err(), "a sent key is still checked");
-}
-
+// spec: WIRE-004
 #[tokio::test]
 async fn storage_outage_is_retryable_unavailable() {
     let s = state(100).await;
@@ -85,6 +65,7 @@ async fn storage_outage_is_retryable_unavailable() {
     assert_eq!(err.code(), Code::Unavailable);
 }
 
+// spec: ERR-001
 #[tokio::test]
 async fn validation_happens_before_storage() {
     let s = state(100).await;
@@ -110,6 +91,7 @@ async fn validation_happens_before_storage() {
     assert_eq!(dispatch(&s, &key, "/dm.sdk.v1.Nope/Nope", &[]).await.unwrap_err().code(), Code::Unimplemented);
 }
 
+// spec: RC-003
 #[tokio::test]
 async fn remote_config_throttling_sends_retry_after() {
     let s = state(1).await;
@@ -135,6 +117,7 @@ fn realtime(last_version: i64) -> Vec<u8> {
         .encode_to_vec()
 }
 
+// spec: RC-010
 #[tokio::test]
 async fn realtime_check_long_polls_until_publish() {
     use crate::pb_dm::{FetchConfigResponse, FetchState};
@@ -163,6 +146,7 @@ async fn realtime_check_long_polls_until_publish() {
     assert_eq!(FetchConfigResponse::decode(body.as_slice()).unwrap().template_version, 2);
 }
 
+// spec: RC-010
 #[tokio::test]
 async fn realtime_check_answers_no_change_after_hold() {
     use crate::pb_dm::{FetchConfigResponse, FetchState};
@@ -178,6 +162,7 @@ async fn realtime_check_answers_no_change_after_hold() {
     assert!(started.elapsed() >= std::time::Duration::from_millis(900));
 }
 
+// spec: WIRE-002
 #[tokio::test]
 async fn grpc_web_response_carries_status_trailer() {
     use axum::body::Body;
@@ -208,6 +193,7 @@ async fn grpc_web_response_carries_status_trailer() {
     assert!(trailers.starts_with("grpc-status:16\r\n"), "{trailers}"); // UNAUTHENTICATED (no key)
 }
 
+// spec: KEY-008
 #[tokio::test]
 async fn admin_api_requires_key() {
     use axum::body::Body;
@@ -239,6 +225,7 @@ async fn admin_api_requires_key() {
     assert_eq!(bad_template.status(), 400, "templates are validated before storage");
 }
 
+// spec: CRA-004
 #[test]
 fn issue_grouping_ignores_exception_reason_and_prefers_in_app_frames() {
     use crate::dm::crashlytics::{issue_id, signature};
@@ -258,6 +245,7 @@ fn issue_grouping_ignores_exception_reason_and_prefers_in_app_frames() {
     assert_ne!(issue_id("dmart", &sa.signature), issue_id("other", &sa.signature));
 }
 
+// spec: CRA-004
 #[test]
 fn metric_kit_crash_signature_uses_attributed_thread() {
     use crate::dm::crashlytics::signature;
@@ -275,6 +263,7 @@ fn metric_kit_crash_signature_uses_attributed_thread() {
     assert!(s.title.starts_with("MetricKit crash"));
 }
 
+// spec: CRA-005
 #[test]
 fn stored_stack_round_trips_hex_addresses() {
     use mongodb::bson::doc;
@@ -289,6 +278,7 @@ fn stored_stack_round_trips_hex_addresses() {
     assert!(first_is_pc);
 }
 
+// spec: CRA-005
 #[test]
 fn uuid_formatting_matches_dwarfdump() {
     let bytes = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
@@ -297,6 +287,7 @@ fn uuid_formatting_matches_dwarfdump() {
 
 /// Same reference bytes as the iOS package's DMSDKTests (produced by Google's protobuf runtime),
 /// so server and app agree on the wire format byte-for-byte.
+// spec: WIRE-001, RC-021
 #[test]
 fn wire_format_matches_ios_reference_bytes() {
     use crate::pb_dm::{Experiment, FetchConfigResponse, FetchState};

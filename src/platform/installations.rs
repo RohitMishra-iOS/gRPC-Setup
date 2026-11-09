@@ -115,12 +115,14 @@ async fn check_refresh(state: &AppState, fid: &str, headers: &HeaderMap) -> ApiR
 
 pub async fn generate_auth_token(State(state): State<AppState>, Path(fid): Path<String>, headers: HeaderMap) -> ApiResult {
     let app_id = check_refresh(&state, &fid, &headers).await?;
+    super::require_api_key(&state, &headers, Some(&app_id))?;
     let _ = state.db.coll(COLLECTION).update_one(doc! { "_id": &fid }, doc! { "$set": { "last_seen": DateTime::now() } }).await;
     ok(auth_token(&state, &fid, &app_id))
 }
 
 pub async fn delete(State(state): State<AppState>, Path(fid): Path<String>, headers: HeaderMap) -> ApiResult {
     let app_id = check_refresh(&state, &fid, &headers).await?;
+    super::require_api_key(&state, &headers, Some(&app_id))?;
     state.db.coll(COLLECTION).delete_one(doc! { "_id": &fid }).await.map_err(ApiError::db)?;
     // Same identity is used for push: drop its registration too.
     let _ = state.db.devices.delete_many(doc! { "app_id": &app_id, "installation_id": &fid }).await;

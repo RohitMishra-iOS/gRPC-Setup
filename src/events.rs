@@ -6,22 +6,22 @@
 //! with 400; an invalid event is dropped and listed in `rejected_events`; an invalid parameter or
 //! user property is dropped and listed in `warnings`. Everything else is stored.
 //!
-//! Store-and-forward contract (Firebase-style, see the "Applying this to analytics-sdk-ios" notes):
+//! This is the format of SDK builds before 2.1 (current SDKs use AnalyticsService/UploadEvents).
+//! Valid batches are converted (dm/analytics/legacy.rs) and stored in the GA4 tables.
+//!
+//! Store-and-forward contract:
 //!  * `batch_id` is an idempotency key. The first copy is stored; a retried copy (client timed out
 //!    after the server saved it) is acknowledged with `"duplicate": true` and not stored again.
 //!  * Every response carries `"accepted": true|false` — clients delete queued rows only on true.
-//!  * One `analytics_users` document per (app_id, installation_id) keeps first/last seen, the
-//!    latest user id, user properties, app/device snapshot and the last session.
-//!  * `"debug": true` batches (debug builds / launch argument) are stored with the flag so
-//!    DebugView can filter on them.
+//!  * `"debug": true` batches are stored with `debug_mode = 1` so DebugView shows them.
 
 use serde_json::{json, Map, Value as Json};
 
-use crate::db::Db;
+use crate::dm::{analytics, AppState, RequestMeta};
 use crate::validate::{is_analytics_name, is_safe_id, limits};
 
 /// Parameters the SDKs add on their own; they don't count against the 25-parameter limit.
-const AUTOMATIC_PARAMS: &[&str] = &["screen_name", "screen_class", "session_number", "ga_session_id", "engagement_time_msec", "previous_screen_name", "previous_screen_class"];
+const AUTOMATIC_PARAMS: &[&str] = &["firebase_screen", "firebase_screen_class", "firebase_event_origin", "screen_name", "screen_class", "session_number", "ga_session_id", "engagement_time_msec", "previous_screen_name", "previous_screen_class"];
 
 /// Result of validating a batch: what will be stored, plus what was dropped and why.
 pub struct CheckedBatch {
@@ -226,14 +226,6 @@ fn check_param_value(key: &str, value: &Json) -> Result<(), String> {
     }
 }
 
-/// Batch-level problems only (kept for callers/tests that just need a yes/no).
-pub fn validate_events_batch(body: &Json) -> Vec<String> {
-    match check_batch(body, chrono::Utc::now().timestamp_millis()) {
-        Ok(_) => Vec::new(),
-        Err(errors) => errors,
-    }
-}
-
 /// `{ ...body, ...extra }` — echoes the incoming JSON back with extra fields merged in.
 pub fn merge(body: &Json, extra: Json) -> Json {
     let mut out = body.as_object().cloned().unwrap_or_default();
@@ -243,51 +235,47 @@ pub fn merge(body: &Json, extra: Json) -> Json {
     Json::Object(out)
 }
 
-/// Validates + persists an already-parsed batch.
-/// Returns (status_code, payload) where payload is the body merged with
-/// a status_code field (and error/details on failure).
-pub async fn process_batch(db: &Db, body: &Json) -> (u16, Json) {
-    let checked = match check_batch(body, chrono::Utc::now().timestamp_millis()) {
+/// Validates and stores an already-parsed old-format batch (SDK builds before 2.1). The events go
+/// to the GA4 tables through the same path as AnalyticsService/UploadEvents (dm-specs TBL-013);
+/// the response keeps the old format: the body echoed back plus status_code, accepted, duplicate,
+/// rejected_events and warnings.
+pub async fn process_batch(state: &AppState, meta: &RequestMeta, body: &Json) -> (u16, Json) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let checked = match check_batch(body, now_ms) {
         Ok(checked) => checked,
         Err(errors) => {
             return (400, merge(body, json!({ "status_code": 400, "accepted": false, "error": "Validation failed", "details": errors })));
         }
     };
-    if !checked.rejected_events.is_empty() || !checked.warnings.is_empty() {
-        println!("[Events] batch_id={} dropped {} event(s), {} warning(s)", batch_id_label(body), checked.rejected_events.len(), checked.warnings.len());
-    }
-    let report = json!({ "rejected_events": checked.rejected_events, "warnings": checked.warnings });
-    let body = &checked.body;
-
-    match db.claim_batch(body).await {
-        Ok(false) => {
-            println!("[Events] duplicate batch_id={} ignored", batch_id_label(body));
-            return (200, merge(&merge(body, report), json!({ "status_code": 200, "accepted": true, "duplicate": true })));
+    let (context, request) = analytics::legacy::convert(&checked.body, meta);
+    let mut rejected_events = checked.rejected_events;
+    let mut warnings = checked.warnings;
+    let converted = match analytics::check_request(request, now_ms * 1000) {
+        Ok(converted) => converted,
+        Err(errors) => {
+            return (400, merge(body, json!({ "status_code": 400, "accepted": false, "error": "Validation failed", "details": errors })));
         }
-        Ok(true) => {}
-        Err(err) => {
-            eprintln!("[DB] batch claim error: {err}");
-            return (500, merge(body, json!({ "status_code": 500, "accepted": false, "error": "Database save failed", "details": [err.to_string()] })));
+    };
+    rejected_events.extend(converted.rejected.iter().map(|r| json!({ "index": r.index, "name": r.name, "errors": r.errors })));
+    warnings.extend(converted.warnings.iter().cloned());
+    let report = json!({ "rejected_events": rejected_events, "warnings": warnings });
+    let converted = analytics::Checked { rejected: Vec::new(), warnings: Vec::new(), ..converted };
+    match analytics::ingest(state, meta, &context, converted, now_ms * 1000).await {
+        Ok(response) => {
+            if response.duplicate {
+                println!("[Events] duplicate batch_id={} ignored", batch_id_label(body));
+            }
+            (200, merge(&merge(&checked.body, report), json!({ "status_code": 200, "accepted": true, "duplicate": response.duplicate })))
         }
+        Err(status) => (500, merge(body, json!({ "status_code": 500, "accepted": false, "error": "Database save failed", "details": [status.message()] }))),
     }
-
-    if let Err(err) = db.save_event_batch(body).await {
-        eprintln!("[DB] save error: {err}");
-        db.release_batch(body).await; // let the client's retry store it
-        return (500, merge(body, json!({ "status_code": 500, "accepted": false, "error": "Database save failed", "details": [err.to_string()] })));
-    }
-    if let Err(err) = db.upsert_analytics_user(body).await {
-        eprintln!("[DB] analytics user upsert error: {err}"); // the batch itself is safe
-    }
-
-    (200, merge(&merge(body, report), json!({ "status_code": 200, "accepted": true, "duplicate": false })))
 }
 
 /// Parses a raw JSON string, then validates + persists it.
-pub async fn process_events_json(db: &Db, raw: &str) -> (u16, Json) {
+pub async fn process_events_json(state: &AppState, meta: &RequestMeta, raw: &str) -> (u16, Json) {
     let raw = if raw.is_empty() { "{}" } else { raw };
     match serde_json::from_str::<Json>(raw) {
-        Ok(body) => process_batch(db, &body).await,
+        Ok(body) => process_batch(state, meta, &body).await,
         Err(err) => (400, json!({ "status_code": 400, "error": "Invalid JSON", "details": [err.to_string()] })),
     }
 }

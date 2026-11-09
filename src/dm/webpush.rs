@@ -195,6 +195,7 @@ fn decrypt_with(shared: &[u8], ua_public: &[u8], auth_secret: &[u8], body: &[u8]
 mod tests {
     use super::*;
 
+    // spec: MSG-003
     #[test]
     fn rfc8291_round_trip() {
         let rng = SystemRandom::new();
@@ -213,6 +214,7 @@ mod tests {
         assert_eq!(decrypt_with(&shared_ua, &ua_public, &auth, &body), b"{\"hello\":\"web\"}");
     }
 
+    // spec: MSG-003
     #[test]
     fn vapid_keys_and_header() {
         let (pem, public) = generate_keys();

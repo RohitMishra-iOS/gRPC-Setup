@@ -374,6 +374,7 @@ com.dmart.checkout.PriceCalculator -> a.d:
 # {"id":"sourceFile","fileName":"PriceCalculator.kt"}
 "#;
 
+    // spec: CRA-006
     #[test]
     fn retraces_lines_inlining_and_classes() {
         let m = Mapping::parse(MAPPING);
@@ -394,6 +395,7 @@ com.dmart.checkout.PriceCalculator -> a.d:
         assert!(m.retrace("x.y.z", 1).is_none());
     }
 
+    // spec: CRA-006
     #[test]
     fn client_frames_without_mapping() {
         let frames = [ClientFrame { symbol: "com.dmart.Main.run", file: "Main.kt", line: 10, library: "app" }, ClientFrame { symbol: "android.os.Handler.dispatch", file: "Handler.java", line: 0, library: "android" }];

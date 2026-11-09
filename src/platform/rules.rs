@@ -608,6 +608,7 @@ pub fn auth_value(user: Option<&super::tokens::IdClaims>) -> Json {
 
 #[cfg(test)]
 mod tests {
+    // spec: RUL-003
     #[test]
     fn rule_set_violations() {
         let rule = |pattern: &str, read: Option<&str>| Rule { pattern: pattern.into(), read: read.map(Into::into), write: None, get: None, list: None, create: None, update: None, delete: None };
@@ -635,6 +636,7 @@ mod tests {
         })
     }
 
+    // spec: RUL-001
     #[test]
     fn paths() {
         assert_eq!(match_path("users/{uid}", "users/abc").unwrap()["uid"], "abc");
@@ -644,6 +646,7 @@ mod tests {
         assert!(match_path("posts/{id}", "users/1").is_none());
     }
 
+    // spec: RUL-002
     #[test]
     fn expressions() {
         let c = ctx(Some("u1"));
@@ -664,6 +667,7 @@ mod tests {
         assert!(evaluate("auth.uid ==", &c).is_err());
     }
 
+    // spec: RUL-001
     #[test]
     fn rule_sets() {
         let rules: Vec<Rule> = serde_json::from_value(json!([

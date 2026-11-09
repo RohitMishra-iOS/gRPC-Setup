@@ -5,7 +5,8 @@ serves:
 
 | Service | RPCs | Stored in |
 |---|---|---|
-| `status.StatusService` (Analytics, unchanged from 1.x) | `CheckStatus` | `event_data` |
+| `dm.sdk.v1.AnalyticsService` | `UploadEvents` | `analytics_<app>.events_YYYYMMDD` + user tables ([GA4 BigQuery layout](#analytics-tables-ga4-bigquery-layout)) |
+| `status.StatusService` + `POST /events` (Analytics from SDK builds before 2.1) | `CheckStatus` | converted into the same tables |
 | `dm.sdk.v1.CrashlyticsService` | `UploadCrashReports` | `crash_reports`, `crash_issues` |
 | `dm.sdk.v1.RemoteConfigService` | `FetchConfig` | `rc_templates` |
 | `dm.sdk.v1.PerformanceService` | `UploadPerformance` | `perf_records` |
@@ -28,8 +29,9 @@ server/
 │   ├── main.rs              # Config + starts native gRPC and gRPC-Web in one process
 │   ├── config.rs            # Environment → Config
 │   ├── db.rs                # MongoDB: collections, indexes, TTLs (created on startup)
-│   ├── grpc.rs              # StatusService / CheckStatus (analytics)
-│   ├── events.rs            # Analytics batch validation (/events + CheckStatus)
+│   ├── grpc.rs              # StatusService / CheckStatus (analytics from old SDK builds)
+│   ├── events.rs            # Old-format batch validation (/events + CheckStatus) → dm/analytics
+│   ├── dm/analytics/        # AnalyticsService: validation, GA4 rows, daily tables, export, migration
 │   ├── proxy.rs             # gRPC-Web routing, /events, /health, /v1/symbols, /admin, CORS
 │   ├── tests.rs             # Request-path tests (no MongoDB needed)
 │   └── dm/
@@ -87,7 +89,10 @@ also needs `dbAdmin`; without it the server logs a warning and keeps the old TTL
 
 | Collection | `_id` | Key fields | Indexes |
 |---|---|---|---|
-| `event_data` | ObjectId | `events[]`, `batch_id`, `instance_id`, `installation_id`, `app_id`, `app.version_name`, `received_at` | `batch_id`, `app_id+received_at`, `installation_id`, `events.name+received_at` |
+| `analytics_<app_id>.events_YYYYMMDD` | `<batch_id>:<index>` | One row per event in the **GA4 / Firebase BigQuery export layout** (see [Analytics tables](#analytics-tables-ga4-bigquery-layout)) | `event_name+event_timestamp`, `user_pseudo_id+event_timestamp`, `user_id`, `event_timestamp` |
+| `analytics_<app_id>.pseudonymous_users_YYYYMMDD` / `users_YYYYMMDD` | pseudo id / user id | GA4 user tables: `user_info`, `device`, `geo`, `user_properties`, `user_ltv`, `privacy_info`, `occurrence_date` | `user_info.last_active_timestamp_micros` |
+| `analytics_users` | ObjectId | Lifetime profile per `app_id+installation_id`: LTV, sessions, first traffic source, last click, last screen | **unique** `app_id+installation_id` |
+| `event_data` | ObjectId | Batches stored by server versions before 3.2 (nothing new is written; convert with `migrate-legacy`) | `batch_id`, `app_id+received_at` |
 | `crash_reports` | report id | `app_id`, `installation_id`, `kind`, `is_fatal`, `timestamp`, `launch_id`, `app_version`, `issue_id`, `custom_keys`, `logs`, `breadcrumbs`, `binary_images`, `return_addresses` (hex), `symbolicated_frames`, `metric_kit` | `app_id+issue_id+timestamp`, `app_id+app_version+timestamp`, `installation_id+timestamp`, `binary_images.uuid+symbolicated`, TTL |
 | `crash_issues` | issue id | `title`, `subtitle`, `signature`, `status` (open/closed/muted/regressed), `count`, `first_seen`, `last_seen`, `versions` | `app_id+last_seen`, `app_id+count` |
 | `perf_records` | record id | `kind`, `name`, `start_time`, `duration_ms`, `counters`, `attributes`, `network.*`, `rendering.*`, `app_version` | `app_id+kind+name+start_time`, `app_id+app_version+kind`, TTL |
@@ -97,8 +102,62 @@ also needs `dbAdmin`; without it the server logs a warning and keeps the old TTL
 | `push_messages` | message id | `target`, `sent`, `failed`, `failure_reasons`, `payload` | `app_id+created_at`, TTL |
 | `dsyms.files` / `dsyms.chunks` | GridFS | DWARF binaries | GridFS defaults |
 
-TTL = `received_at` expires after `DM_RETENTION_DAYS` (default 90). Analytics (`event_data`)
-keeps its 1.x behaviour of no expiry unless `DM_ANALYTICS_RETENTION_DAYS` is set.
+TTL = `received_at` expires after `DM_RETENTION_DAYS` (default 90). Analytics tables are kept
+forever unless `DM_ANALYTICS_RETENTION_DAYS` is set (then whole daily tables older than that are dropped).
+
+## Analytics tables (GA4 BigQuery layout)
+
+Analytics are stored exactly like Firebase (GA4) exports to BigQuery, so the same queries work
+here and a day can be loaded into BigQuery as it is. Specs: `dm-specs/specs/15-analytics-tables.md`
+(TBL-001…014) and `10-analytics.md` (ANA-010…013).
+
+| BigQuery | Here (MongoDB) |
+|---|---|
+| dataset `analytics_<property_id>` | collection prefix `analytics_<app_id>.` |
+| `events_YYYYMMDD` | collection `analytics_<app_id>.events_YYYYMMDD`, `YYYYMMDD` in `DM_ANALYTICS_TIMEZONE`. Written as events arrive, so it is also the real-time ("intraday") table |
+| `pseudonymous_users_YYYYMMDD` / `users_YYYYMMDD` | same names, rewritten on every upload of that day |
+| RECORD / REPEATED / INTEGER / FLOAT | sub-document / array / int64 / double; unknown values are `null` |
+
+Every event row has all 30 GA4 columns: `event_date, event_timestamp (µs), event_name,
+event_params[{key, value{string_value, int_value, float_value, double_value}}], event_previous_timestamp,
+event_value_in_usd, event_bundle_sequence_id, event_server_timestamp_offset, user_id, user_pseudo_id,
+privacy_info, user_properties, user_first_touch_timestamp, user_ltv, device, geo, app_info,
+traffic_source, stream_id, platform, event_dimensions, ecommerce, items, collected_traffic_source,
+is_active_user, batch_event_index, batch_page_id, batch_ordering_id, session_traffic_source_last_click, publisher`.
+
+**Upload:** `dm.sdk.v1.AnalyticsService/UploadEvents` (gRPC, gRPC-Web, or JSON at
+`/v1/rpc/dm.sdk.v1.AnalyticsService/UploadEvents`). Each parameter value is a protobuf `oneof`, so an
+int stays `int_value` and a double stays `double_value`. Old SDK builds keep using `/events` /
+`CheckStatus`; their batches are converted (old names such as `screen_name` become `firebase_screen`).
+
+**What the server derives:** `event_date` and the table, `platform` / `stream_id`, Apple marketing
+names (`iPhone16,2 → iPhone 15 Pro Max`), `geo` (with `DM_TRUST_GEO_HEADERS`), `traffic_source`
+(first campaign), `collected_traffic_source` (campaign params), `session_traffic_source_last_click` with
+GA4's default channel group, `ecommerce` / `items` for ecommerce events, `publisher` for
+`ad_impression`, `*_in_usd` (with `DM_USD_RATES`), `user_ltv`, `is_active_user`, `debug_mode`.
+
+**Admin API**
+
+```bash
+curl -H "x-admin-key: $K" $SERVER/admin/analytics/dmart-ready/tables                     # tables + row counts
+curl -H "x-admin-key: $K" $SERVER/admin/analytics/dmart-ready/tables/events_20261109?limit=20
+curl -H "x-admin-key: $K" $SERVER/admin/analytics/schema/events > events_schema.json   # BigQuery schema
+curl -H "x-admin-key: $K" -o day.ndjson $SERVER/admin/analytics/dmart-ready/tables/events_20261109/export
+bq load --source_format=NEWLINE_DELIMITED_JSON analytics_dmart.events_20261109 day.ndjson events_schema.json
+curl -X POST -H "x-admin-key: $K" "$SERVER/admin/analytics/dmart-ready/migrate-legacy?days=90"  # old event_data → tables
+```
+
+**Example (MongoDB)** — the same question as the PDF's BigQuery example:
+
+```js
+db.getCollection("analytics_dmart-ready.events_20261109").aggregate([
+  { $match: { platform: "IOS" } },
+  { $project: { event_date: 1, event_name: 1, user_pseudo_id: 1,
+      session_id: { $first: { $map: { input: { $filter: { input: "$event_params", cond: { $eq: ["$$this.key", "ga_session_id"] } } }, in: "$$this.value.int_value" } } },
+      screen: { $first: { $map: { input: { $filter: { input: "$event_params", cond: { $eq: ["$$this.key", "firebase_screen"] } } }, in: "$$this.value.string_value" } } },
+      os: "$device.operating_system_version", version: "$app_info.version" } },
+])
+```
 
 ---
 
@@ -111,10 +170,17 @@ keeps its 1.x behaviour of no expiry unless `DM_ANALYTICS_RETENTION_DAYS` is set
 | `ALLOWED_ORIGINS` | `*` | CORS origins |
 | `MONGODB_URI` | — | **Required** |
 | `MONGODB_DB_NAME` | `grpc_status` | Database name |
-| `DM_API_KEYS` | — | `key` or `app_id:key`, comma-separated. Required as `x-api-key` on dm.sdk.v1 and `/v1/symbols`. **Unset = no auth (dev only).** `CheckStatus` stays open, as in 1.x |
+| `DM_API_KEYS` | — | **Required.** `key` or `app_id:key`, comma-separated. Every client request (dm.sdk.v1, `/events`, `CheckStatus`, `/v1/*` platform APIs, `/v1/symbols`) must send a matching `x-api-key`; a missing or wrong key gets 401 `UNAUTHENTICATED`. The server refuses to start without it |
+| `DM_EVENTS_REQUIRE_API_KEY` | `true` | `false` lets analytics batches *without* a key through (old app builds that send none). A key that is sent is always checked |
+| `DM_ALLOW_UNAUTHENTICATED` | `false` | `true` = start without `DM_API_KEYS` and check no keys at all. Local development only |
 | `DM_ADMIN_KEY` | — | Enables `/admin` (send as `x-admin-key`) |
 | `DM_RETENTION_DAYS` | `90` | TTL for crash/perf/push documents (0 = forever) |
-| `DM_ANALYTICS_RETENTION_DAYS` | `0` | TTL for `event_data` (0 = forever) |
+| `DM_ANALYTICS_RETENTION_DAYS` | `0` | Drop daily analytics tables older than this (0 = forever) |
+| `DM_ANALYTICS_TIMEZONE` | `UTC` | Property time zone (IANA, e.g. `Asia/Kolkata`): `event_date` and the `_YYYYMMDD` table suffix |
+| `DM_ANALYTICS_CURRENCY` | `USD` | Property currency (ISO 4217, e.g. `INR`) for `user_ltv` |
+| `DM_USD_RATES` | — | USD per unit for the `*_in_usd` columns, e.g. `INR:0.012,EUR:1.08`; unknown currencies leave them `null` |
+| `DM_TRUST_GEO_HEADERS` | `false` | `true` behind Cloudflare (or another CDN that sets `cf-ipcountry`, `cf-ipcity`, `cf-region`, `cf-ipcontinent`): fills `geo`. Without a CDN a client could forge these, so `geo` stays `null` |
+| `DM_ANALYTICS_USER_TABLES` | `true` | Write the `pseudonymous_users_YYYYMMDD` / `users_YYYYMMDD` snapshots |
 | `DM_RC_FETCHES_PER_HOUR` / `DM_RC_REALTIME_CHECKS_PER_HOUR` | `30` / `120` | Remote Config throttle per installation |
 | `DM_RC_REALTIME_HOLD_SECONDS` | `45` | Real-time Remote Config checks are held open this long waiting for a publish (long polling), so devices get changes within ~1 s. Keep below the SDK's `fetchTimeout` (60 s). `0` disables |
 | `DM_ALERT_WEBHOOK_URL` | — | Slack-compatible webhook for crash alerts |
@@ -466,7 +532,7 @@ Default (no rules saved): signed-in users can read and write everything. Express
 `/admin/functions…` — see `src/platform/admin.rs`.
 
 **Testing:** start a MongoDB replica set locally, run the server with `tests/e2e.env`, then
-`python3 tests/e2e_platform.py` (75 end-to-end checks), `python3 tests/e2e_validation.py` (49 input-validation checks) and `python3 tests/e2e_webpush.py` (Web Push decrypted by the RFC 8291 reference implementation).
+`python3 tests/e2e_platform.py` (75 end-to-end checks), `tests/e2e_validation.py` (53 input-validation checks), `tests/e2e_api_keys.py` (56 API key checks), `tests/e2e_rc_subscriptions.py` (9), `tests/e2e_contract.py` (5) and `tests/e2e_webpush.py` (Web Push decrypted by the RFC 8291 reference implementation). Every check names the requirement it proves (`[KEY-001] …`); the requirements live in the `dm-specs` project.
 
 ## Running in Development
 
@@ -522,7 +588,7 @@ The main rules:
 
 | Area | Rules |
 |---|---|
-| Analytics | ≤ 500 events/batch; event + parameter names `^[A-Za-z][A-Za-z0-9_]*$` ≤ 40; ≤ 25 custom parameters; strings ≤ 500; items ≤ 200 × 27 params; user properties ≤ 24/36 chars; timestamps within 30 days back / 1 day ahead; consent `granted`/`denied`; gzip bodies; API key required when `DM_API_KEYS` is set (`DM_EVENTS_REQUIRE_API_KEY=false` accepts keyless batches) |
+| Analytics | ≤ 500 events/batch; event + parameter names `^[A-Za-z][A-Za-z0-9_]*$` ≤ 40; ≤ 25 custom parameters; strings ≤ 500; items ≤ 200 × 27 params; user properties ≤ 24/36 chars; timestamps within 30 days back / 1 day ahead; consent `granted`/`denied`; gzip bodies; valid API key required (`DM_EVENTS_REQUIRE_API_KEY=false` admits keyless batches from old builds) |
 | Client context (all RPCs) | ids `[A-Za-z0-9._:-]` ≤ 128; known `platform` and `network_type`; text fields ≤ 256 |
 | Crashlytics | ≤ 64 keys (≤ 1 KB each), logs ≤ 128 KB, ≤ 1024 frames, known kind, sane timestamps |
 | Performance | Firebase trace rules (no leading `_` for custom traces, ≤ 100 chars), ≤ 32 metrics, ≤ 5 (+SDK) attributes, duration 0–24 h, valid URL/method/status for network records |

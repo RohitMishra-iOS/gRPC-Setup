@@ -131,6 +131,7 @@ impl FcmClient {
 mod tests {
     use super::*;
 
+    // spec: MSG-003
     #[test]
     fn message_shape() {
         let notification = json!({ "title": "Hi", "body": "There", "image_url": "https://x/y.png" });

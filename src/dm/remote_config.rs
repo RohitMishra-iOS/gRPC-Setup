@@ -754,6 +754,7 @@ mod tests {
         .unwrap()
     }
 
+    // spec: RC-004
     #[test]
     fn first_matching_condition_in_template_order_wins() {
         let t = template();
@@ -769,6 +770,7 @@ mod tests {
         assert!(["green", "orange"].contains(&entries["color"].as_str()));
     }
 
+    // spec: RC-004
     #[test]
     fn no_default_means_absent() {
         let (entries, _) = template().evaluate(&EvalContext { installation_id: "i2".into(), ..Default::default() });
@@ -776,6 +778,7 @@ mod tests {
         assert!(!entries.contains_key("gold_only"));
     }
 
+    // spec: RC-006
     #[test]
     fn variant_assignment_is_sticky_and_split() {
         let t = template();
@@ -790,6 +793,7 @@ mod tests {
         assert!(counts["A"] > 800 && counts["B"] > 800, "{counts:?}");
     }
 
+    // spec: RC-005
     #[test]
     fn validation_catches_dangling_condition() {
         let bad: Template = serde_json::from_value(json!({
@@ -803,6 +807,7 @@ mod tests {
         EvalContext { installation_id: installation.into(), ..Default::default() }
     }
 
+    // spec: RC-006
     #[test]
     fn rollouts_reach_their_percentage_and_override_conditions() {
         let template: Template = serde_json::from_value(serde_json::json!({
@@ -823,6 +828,7 @@ mod tests {
         assert!((0..200).all(|i| paused.evaluate(&ctx_for(&format!("install-{i}"))).0["new_checkout"] == "false"));
     }
 
+    // spec: RC-005
     #[test]
     fn value_types_are_enforced() {
         let bad: Template = serde_json::from_value(serde_json::json!({
@@ -843,6 +849,7 @@ mod tests {
         assert!(unknown.validate().unwrap_err().contains("unknown parameter"));
     }
 
+    // spec: RC-005
     #[test]
     fn publish_stamps_only_changed_entries() {
         let v1: Template = serde_json::from_value(serde_json::json!({
@@ -860,6 +867,7 @@ mod tests {
         assert_eq!(second.conditions[0].updated_at.as_deref(), Some("2026-10-01T00:00:00Z"));
     }
 
+    // spec: RC-003
     #[test]
     fn throttle_window() {
         let rc = RcState::default();

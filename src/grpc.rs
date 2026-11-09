@@ -4,7 +4,7 @@ use prost_types::{value::Kind, ListValue, Struct, Value};
 use serde_json::{Map, Number, Value as Json};
 use tonic::{Request, Response, Status};
 
-use crate::db::Db;
+use crate::dm::{AppState, RequestMeta};
 use crate::events;
 use crate::pb::status_service_server::StatusService;
 use crate::pb::{StatusRequest, StatusResponse};
@@ -59,11 +59,11 @@ pub fn json_to_struct(v: &Json) -> Struct {
 
 // ── CheckStatus ───────────────────────────────────────────────────────────────
 
-pub async fn check_status(db: &Db, request: StatusRequest) -> StatusResponse {
+pub async fn check_status(state: &AppState, meta: &RequestMeta, request: StatusRequest) -> StatusResponse {
     let body = request.message.as_ref().map_or_else(|| Json::Object(Map::new()), struct_to_json);
-    println!("[gRPC] CheckStatus ← {body}");
+    println!("[gRPC] CheckStatus ← {} event(s)", events::events_len(&body));
 
-    let (code, payload) = events::process_batch(db, &body).await;
+    let (code, payload) = events::process_batch(state, meta, &body).await;
     if code == 200 {
         println!("[gRPC] ✓ batch_id={} events={}", events::batch_id_label(&body), events::events_len(&body));
     }
@@ -76,12 +76,13 @@ pub async fn check_status(db: &Db, request: StatusRequest) -> StatusResponse {
 }
 
 pub struct StatusSvc {
-    pub db: Db,
+    pub state: AppState,
 }
 
 #[tonic::async_trait]
 impl StatusService for StatusSvc {
     async fn check_status(&self, request: Request<StatusRequest>) -> Result<Response<StatusResponse>, Status> {
-        Ok(Response::new(check_status(&self.db, request.into_inner()).await))
+        let meta = RequestMeta::from_metadata(request.metadata());
+        Ok(Response::new(check_status(&self.state, &meta, request.into_inner()).await))
     }
 }
