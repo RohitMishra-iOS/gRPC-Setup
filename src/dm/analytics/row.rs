@@ -480,9 +480,9 @@ pub fn user_properties_map(properties: &[AnalyticsUserProperty]) -> Document {
 
 // ── Ecommerce, items, publisher (TBL-008, TBL-009) ──────────────────────────────────────────────
 
-const ITEM_TEXT: [&str; 21] = [
+const ITEM_TEXT: [&str; 22] = [
     "item_id", "item_name", "item_brand", "item_variant", "item_category", "item_category2", "item_category3", "item_category4",
-    "item_category5", "coupon", "affiliation", "location_id", "item_list_id", "item_list_name", "item_list_index", "promotion_id",
+    "item_category5", "coupon", "affiliation", "location_id", "item_list_id", "item_list_name", "item_list_index", "index", "promotion_id",
     "promotion_name", "creative_name", "creative_slot", "price", "quantity",
 ];
 
@@ -531,7 +531,8 @@ fn item_row(item: &AnalyticsItem, event: &Params, name: &str, currency: &str, cf
         "location_id": o(p.text("location_id")),
         "item_list_id": o(inherited("item_list_id")),
         "item_list_name": o(inherited("item_list_name")),
-        "item_list_index": o(inherited("item_list_index")),
+        // Firebase's item parameter `index` is the position in the list.
+        "item_list_index": o(p.text("item_list_index").or_else(|| p.text("index")).or_else(|| event.text("item_list_index"))),
         "promotion_id": o(inherited("promotion_id")),
         "promotion_name": o(inherited("promotion_name")),
         "creative_name": o(inherited("creative_name")),
@@ -902,7 +903,7 @@ mod tests {
     // spec: TBL-008, TBL-005
     #[test]
     fn purchase_ecommerce_items_and_ltv() {
-        let item = AnalyticsItem { params: vec![param("item_id", Value::StringValue("A".into())), param("price", Value::IntValue(100)), param("quantity", Value::IntValue(3)), param("shelf", Value::StringValue("top".into()))] };
+        let item = AnalyticsItem { params: vec![param("item_id", Value::StringValue("A".into())), param("price", Value::IntValue(100)), param("quantity", Value::IntValue(3)), param("shelf", Value::StringValue("top".into())), param("index", Value::IntValue(4))] };
         let purchase = |v: i64| ev("purchase", vec![param("value", Value::IntValue(v)), param("currency", Value::StringValue("INR".into())), param("tax", Value::IntValue(10)), param("transaction_id", Value::StringValue("T1".into()))], vec![item.clone()]);
         let request = UploadEventsRequest { events: vec![purchase(300), purchase(50)], ..Default::default() };
         let built = build(&cfg(), &ctx(), &request, &[0, 1], &Geo::default(), &Profile::default(), now_micros(), false);
@@ -918,6 +919,7 @@ mod tests {
         let first = items[0].as_document().unwrap();
         assert_eq!(first.get_f64("item_revenue").unwrap(), 300.0);
         assert_eq!(first.get_array("item_params").unwrap().len(), 1);
+        assert_eq!(first.get_str("item_list_index").unwrap(), "4");
         assert_eq!(get(row, "user_ltv.revenue").as_f64(), Some(300.0));
         assert_eq!(get(&built.rows[1].1, "user_ltv.revenue").as_f64(), Some(350.0));
         assert_eq!(get(&built.rows[1].1, "user_ltv.currency").as_str(), Some("INR"));
