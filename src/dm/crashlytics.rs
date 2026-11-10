@@ -150,13 +150,17 @@ async fn ingest(state: &AppState, context: &ClientContext, mut report: CrashRepo
     if retraced {
         document.insert("retraced", true);
     }
+    let location = super::symbols::crash_location(&frames);
+    if let Some(location) = &location {
+        document.insert("crash_location", location);
+    }
     match state.db.crash_reports.insert_one(document).await {
         Ok(_) => {}
         Err(err) if is_duplicate_key(&err) => return Ok(()), // concurrent retry won the race
         Err(err) => return Err(unavailable(err)),
     }
 
-    update_issue(state, context, &report, kind, &issue, &issue_id, &app_version, timestamp).await
+    update_issue(state, context, &report, kind, &issue, &issue_id, &app_version, timestamp, location.as_deref()).await
 }
 
 // ── Grouping ─────────────────────────────────────────────────────────────────
@@ -401,8 +405,14 @@ async fn update_issue(
     issue_id: &str,
     app_version: &str,
     timestamp: DateTime,
+    location: Option<&str>,
 ) -> Result<(), Status> {
     let now = DateTime::now();
+    let mut latest = doc! { "last_report_id": &report.id, "last_version": app_version, "updated_at": now };
+    if let Some(location) = location {
+        // File:line of the newest symbolicated crash (dm-specs CRA-005).
+        latest.insert("crash_location", location);
+    }
     let previous = state
         .db
         .crash_issues
@@ -423,7 +433,7 @@ async fn update_issue(
                 "$inc": { "count": 1_i64 },
                 "$max": { "last_seen": timestamp },
                 "$addToSet": { "versions": app_version },
-                "$set": { "last_report_id": &report.id, "last_version": app_version, "updated_at": now },
+                "$set": latest,
             },
         )
         .upsert(true)

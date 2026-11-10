@@ -6,6 +6,10 @@ description = "DM platform backend: analytics, crashlytics, remote config, perfo
 
 [dependencies]
 addr2line = "0.24"
+# Swift (and C++ / Rust) symbol demangling for symbolicated crash frames. "swift" builds the
+# bundled Swift demangler with the C++ compiler.
+symbolic-demangle = { version = "12", default-features = false, features = ["swift", "cpp", "rust"] }
+symbolic-common = "12"
 argon2 = "0.5"
 base64 = "0.22"
 ciborium = "0.2"
