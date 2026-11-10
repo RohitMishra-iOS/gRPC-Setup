@@ -83,6 +83,23 @@ impl SymFrame {
     }
 }
 
+/// Where the crash happened, for people: the first in-app frame that has a source line
+/// (`ViewController.swift:42 · ViewController.addToCart(_:)`), else the first in-app frame with a
+/// function name. None when nothing is symbolicated (no dSYM / mapping for this build yet).
+pub fn crash_location(frames: &[SymFrame]) -> Option<String> {
+    let with_line = frames.iter().find(|f| f.in_app && f.file.is_some() && f.line.is_some_and(|l| l > 0));
+    if let Some(f) = with_line.or_else(|| frames.iter().find(|f| f.file.is_some() && f.line.is_some_and(|l| l > 0))) {
+        let file = f.file.as_deref().unwrap_or_default();
+        let short = file.rsplit('/').next().unwrap_or(file);
+        let mut out = format!("{short}:{}", f.line.unwrap_or_default());
+        if let Some(symbol) = &f.symbol {
+            out.push_str(&format!(" · {symbol}"));
+        }
+        return Some(out);
+    }
+    frames.iter().find(|f| f.in_app && f.symbol.is_some()).and_then(|f| f.symbol.clone())
+}
+
 // ── Upload ────────────────────────────────────────────────────────────────────
 
 pub async fn upload(State(state): State<AppState>, headers: HeaderMap, mut multipart: Multipart) -> Response {
@@ -400,8 +417,8 @@ fn resolve(path: &std::path::Path, text_vmaddr: u64, probes: &[(usize, u64)]) ->
         if let Ok(mut frames) = loader.find_frames(probe) {
             while let Ok(Some(frame)) = frames.next() {
                 if let Some(function) = &frame.function {
-                    if let Ok(name) = function.demangle() {
-                        names.push(name.into_owned());
+                    if let Ok(raw) = function.raw_name() {
+                        names.push(demangle(&raw));
                     }
                 }
                 if file.is_none() {
@@ -414,7 +431,7 @@ fn resolve(path: &std::path::Path, text_vmaddr: u64, probes: &[(usize, u64)]) ->
         }
         if names.is_empty() {
             if let Some(symbol) = loader.find_symbol(probe) {
-                names.push(symbol.to_string());
+                names.push(demangle(symbol));
             }
         }
         let symbol = names.first().cloned();
@@ -422,6 +439,24 @@ fn resolve(path: &std::path::Path, text_vmaddr: u64, probes: &[(usize, u64)]) ->
         out.push((index, symbol, file, line, inlined));
     }
     Ok(out)
+}
+
+/// Readable function name: Swift (`$s20ProductCardAnimation14ViewControllerC9addToCartyySiF` →
+/// `ViewController.addToCart(_:)`), C++ and Rust are demangled; anything else is returned as is.
+/// Mach-O symbol tables prefix names with `_`, which is dropped first.
+pub fn demangle(raw: &str) -> String {
+    use symbolic_common::{Language, Name, NameMangling};
+    use symbolic_demangle::{Demangle, DemangleOptions};
+    let trimmed = if raw.starts_with("_$s") || raw.starts_with("__T") || raw.starts_with("_$S") || raw.starts_with("__Z") || raw.starts_with("__R") {
+        &raw[1..]
+    } else {
+        raw
+    };
+    let name = Name::new(trimmed, NameMangling::Unknown, Language::Unknown);
+    match name.demangle(DemangleOptions::name_only().parameters(true)) {
+        Some(readable) if !readable.is_empty() => readable,
+        _ => raw.to_string(),
+    }
 }
 
 /// Fills in frames for stored reports that were waiting on these dSYMs.
@@ -436,14 +471,46 @@ pub async fn resymbolicate(state: &AppState, uuids: &[String]) {
         }
         let frames = symbolicate(state, &images, &addresses, first_is_pc).await;
         let symbolicated = frames.iter().any(|f| f.symbol.is_some());
+        let location = crash_location(&frames);
         let frames_bson = mongodb::bson::to_bson(&frames).unwrap_or(Bson::Array(vec![]));
         let id = report.get("_id").cloned().unwrap_or(Bson::Null);
-        let update: Document = doc! { "$set": { "symbolicated_frames": frames_bson, "symbolicated": symbolicated } };
+        let update: Document = doc! { "$set": {
+            "symbolicated_frames": frames_bson,
+            "symbolicated": symbolicated,
+            "crash_location": location.clone().map_or(Bson::Null, Bson::String),
+        } };
         if state.db.crash_reports.update_one(doc! { "_id": id }, update).await.is_ok() && symbolicated {
             updated += 1;
+            // The issue was created before its dSYM arrived: give it the readable location too.
+            if let (Some(location), Ok(issue_id)) = (location, report.get_str("issue_id")) {
+                let _ = state
+                    .db
+                    .crash_issues
+                    .update_one(doc! { "_id": issue_id }, doc! { "$set": { "crash_location": location } })
+                    .await;
+            }
         }
     }
     if updated > 0 {
         println!("[Symbols] re-symbolicated {updated} stored report(s)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::demangle;
+
+    // spec: CRA-005
+    #[test]
+    fn demangles_swift_cpp_and_rust() {
+        println!("{}", demangle("$s20ProductCardAnimation14ViewControllerC11viewDidLoadyyF"));
+        println!("{}", demangle("_$s20ProductCardAnimation14ViewControllerC9addToCart_8quantityySS_SitF"));
+        println!("{}", demangle("$s20ProductCardAnimation16DiwaliCarouselViewC14quantityTapped33_A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6LLyyF"));
+        println!("{}", demangle("_ZN3foo3barEv"));
+        println!("{}", demangle("main"));
+        assert!(demangle("$s20ProductCardAnimation14ViewControllerC11viewDidLoadyyF").contains("ViewController.viewDidLoad()"));
+        assert!(demangle("_$s20ProductCardAnimation14ViewControllerC9addToCart_8quantityySS_SitF").contains("ViewController.addToCart"));
+        assert_eq!(demangle("_ZN3foo3barEv"), "foo::bar()");
+        assert_eq!(demangle("main"), "main");
     }
 }
