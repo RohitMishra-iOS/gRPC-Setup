@@ -1,9 +1,10 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
 FROM rust:1-slim-bookworm AS build
 
-# protoc + google/protobuf/*.proto includes, needed by build.rs (tonic-build)
+# protoc + google/protobuf/*.proto includes, needed by build.rs (tonic-build).
+# g++: symbolic-demangle (swift/cpp features) compiles bundled C++ demanglers.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
+ && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev g++ \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -24,7 +25,7 @@ RUN touch src/main.rs build.rs && cargo build --release
 FROM debian:bookworm-slim AS runner
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
