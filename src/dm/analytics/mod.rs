@@ -285,11 +285,6 @@ pub async fn ingest(state: &AppState, meta: &RequestMeta, context: &ClientContex
     }
 }
 
-/// Writes rows without the batch-id ledger (migration of old data: their ids are already in it).
-pub async fn store_unclaimed(state: &AppState, meta: &RequestMeta, context: &ClientContext, checked: &Checked, received_micros: i64) -> Result<usize, crate::BoxError> {
-    store(state, meta, context, &checked.request, &checked.indices, received_micros).await
-}
-
 async fn store(state: &AppState, meta: &RequestMeta, context: &ClientContext, request: &UploadEventsRequest, indices: &[usize], received: i64) -> Result<usize, crate::BoxError> {
     if request.events.is_empty() {
         return Ok(0);

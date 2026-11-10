@@ -224,17 +224,6 @@ check("[TBL-004] old parameter names become GA4 names", param(sv, "firebase_scre
       and param(sv, "firebase_event_origin")["string_value"] == "auto", sv.get("event_params"))
 check("[TBL-003] old JSON numbers: whole → int_value, other → double_value", olds and param(olds[1], "qty")["int_value"] == 2 and param(olds[1], "price")["double_value"] == 10.5 and olds[1]["items"][0]["item_id"] == "A")
 
-# Migration of old event_data batches (TBL-013)
-legacy_id = f"m-{RUN}"
-DB.event_data.insert_one({"app_id": APP, "batch_id": legacy_id, "installation_id": f"mig-{RUN}", "received_at": datetime.now(timezone.utc),
-                          "events": [{"name": "legacy_event", "timestamp_ms": int(time.time() * 1000), "params": {"n": 1}}]})
-DB.analytics_batches.insert_one({"_id": legacy_id, "app_id": APP})  # the old server had claimed it
-m1 = requests.post(f"{B}/admin/analytics/{APP}/migrate-legacy?days=1", headers=ADMIN, timeout=60).json()
-count1 = DB[table].count_documents({"_id": f"{legacy_id}:0"})
-m2 = requests.post(f"{B}/admin/analytics/{APP}/migrate-legacy?days=1", headers=ADMIN, timeout=60).json()
-count2 = DB[table].count_documents({"_id": f"{legacy_id}:0"})
-check("[TBL-013] migrate-legacy converts old batches once", count1 == 1 and count2 == 1 and m2.get("events_stored") == 0, (m1, m2))
-
 # Admin: tables, rows, export, schema (TBL-012)
 tables = requests.get(f"{B}/admin/analytics/{APP}/tables", headers=ADMIN, timeout=30).json()
 names = [t["table"] for t in tables.get("tables", [])]

@@ -1,5 +1,5 @@
-//! Uploads from SDK builds before 2.1 (`POST /events`, `status.StatusService/CheckStatus`) and batches
-//! stored by server versions before 3.2 (`event_data`) → `UploadEventsRequest` (dm-specs TBL-003, TBL-004, TBL-013).
+//! Uploads from SDK builds before 2.1 (`POST /events`, `status.StatusService/CheckStatus`)
+//! → `UploadEventsRequest` (dm-specs TBL-003, TBL-004, TBL-013).
 //!
 //! Old batch: `{batch_id, app_id, installation_id, instance_id, user_id, screen_name,
 //! user_properties: {k: v}, consent: {analytics_storage: granted|denied, ad_storage},

@@ -11,7 +11,7 @@
 //!   GET /admin/analytics/:app_id/screens?days=               screen_view by firebase_screen
 //!   GET /admin/analytics/:app_id/stream?limit=&installation_id=&event=   newest events (DebugView)
 //!   GET /admin/analytics/:app_id/users/:installation_id      one user's profile, device and event timeline
-//!   (tables / export / schema / migrate-legacy: dm/analytics/export.rs)
+//!   (tables / export / schema: dm/analytics/export.rs)
 //!   GET /admin/crashlytics/:app_id/trend?days=&tz=           crashes / non-fatals / affected users per day
 //!   GET /admin/crashlytics/issues/:issue_id/trend?days=&tz=  one issue per day
 //!   GET /admin/crashlytics/reports/:report_id                one full report
@@ -104,10 +104,6 @@ pub async fn apps(State(state): State<AppState>) -> ApiResult {
         if let Ok(values) = coll.distinct("app_id", doc! {}).await {
             ids.extend(values.into_iter().filter_map(|v| v.as_str().map(str::to_string)));
         }
-    }
-    let recent = DateTime::from_millis(DateTime::now().timestamp_millis() - 30 * 86_400_000);
-    if let Ok(values) = state.db.event_data.distinct("app_id", doc! { "received_at": { "$gte": recent } }).await {
-        ids.extend(values.into_iter().filter_map(|v| v.as_str().map(str::to_string)));
     }
     ids.remove("");
     ok(json!({ "apps": ids }))

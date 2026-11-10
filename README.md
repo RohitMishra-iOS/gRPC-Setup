@@ -92,7 +92,6 @@ also needs `dbAdmin`; without it the server logs a warning and keeps the old TTL
 | `analytics_<app_id>.events_YYYYMMDD` | `<batch_id>:<index>` | One row per event in the **GA4 / Firebase BigQuery export layout** (see [Analytics tables](#analytics-tables-ga4-bigquery-layout)) | `event_name+event_timestamp`, `user_pseudo_id+event_timestamp`, `user_id`, `event_timestamp` |
 | `analytics_<app_id>.pseudonymous_users_YYYYMMDD` / `users_YYYYMMDD` | pseudo id / user id | GA4 user tables: `user_info`, `device`, `geo`, `user_properties`, `user_ltv`, `privacy_info`, `occurrence_date` | `user_info.last_active_timestamp_micros` |
 | `analytics_users` | ObjectId | Lifetime profile per `app_id+installation_id`: LTV, sessions, first traffic source, last click, last screen | **unique** `app_id+installation_id` |
-| `event_data` | ObjectId | Batches stored by server versions before 3.2 (nothing new is written; convert with `migrate-legacy`) | `batch_id`, `app_id+received_at` |
 | `crash_reports` | report id | `app_id`, `installation_id`, `kind`, `is_fatal`, `timestamp`, `launch_id`, `app_version`, `issue_id`, `custom_keys`, `logs`, `breadcrumbs`, `binary_images`, `return_addresses` (hex), `symbolicated_frames`, `metric_kit` | `app_id+issue_id+timestamp`, `app_id+app_version+timestamp`, `installation_id+timestamp`, `binary_images.uuid+symbolicated`, TTL |
 | `crash_issues` | issue id | `title`, `subtitle`, `signature`, `status` (open/closed/muted/regressed), `count`, `first_seen`, `last_seen`, `versions` | `app_id+last_seen`, `app_id+count` |
 | `perf_records` | record id | `kind`, `name`, `start_time`, `duration_ms`, `counters`, `attributes`, `network.*`, `rendering.*`, `app_version` | `app_id+kind+name+start_time`, `app_id+app_version+kind`, TTL |
@@ -143,9 +142,7 @@ curl -H "x-admin-key: $K" $SERVER/admin/analytics/dmart-ready/tables            
 curl -H "x-admin-key: $K" $SERVER/admin/analytics/dmart-ready/tables/events_20261109?limit=20
 curl -H "x-admin-key: $K" $SERVER/admin/analytics/schema/events > events_schema.json   # BigQuery schema
 curl -H "x-admin-key: $K" -o day.ndjson $SERVER/admin/analytics/dmart-ready/tables/events_20261109/export
-bq load --source_format=NEWLINE_DELIMITED_JSON analytics_dmart.events_20261109 day.ndjson events_schema.json
-curl -X POST -H "x-admin-key: $K" "$SERVER/admin/analytics/dmart-ready/migrate-legacy?days=90"  # old event_data → tables
-```
+bq load --source_format=NEWLINE_DELIMITED_JSON analytics_dmart.events_20261109 day.ndjson events_schema.json```
 
 **Example (MongoDB)** — the same question as the PDF's BigQuery example:
 

@@ -25,11 +25,6 @@ const bool = { bsonType: "bool" };
 const long = { bsonType: ["long", "int"] };
 
 const collections = {
-  event_data: {
-    description: "Analytics batches (status.StatusService/CheckStatus and POST /events), one document per batch",
-    required: ["events", "received_at"],
-    properties: { events: { bsonType: "array" }, batch_id: strOrNull, installation_id: strOrNull, app_id: strOrNull, received_at: date },
-  },
   crash_reports: {
     description: "One document per crash / non-fatal / MetricKit diagnostic. _id = report id (idempotent uploads)",
     required: ["_id", "app_id", "installation_id", "kind", "is_fatal", "timestamp", "issue_id", "received_at"],
@@ -122,11 +117,6 @@ function index(collection, keys, name, unique) {
   }
 }
 
-index("event_data", { batch_id: 1 }, "batch_id_1");
-index("event_data", { app_id: 1, received_at: -1 }, "app_received");
-index("event_data", { installation_id: 1 }, "installation");
-index("event_data", { "events.name": 1, received_at: -1 }, "event_name_received");
-
 index("crash_reports", { app_id: 1, issue_id: 1, timestamp: -1 }, "app_issue_time");
 index("crash_reports", { app_id: 1, app_version: 1, timestamp: -1 }, "app_version_time");
 index("crash_reports", { installation_id: 1, timestamp: -1 }, "installation_time");
@@ -151,7 +141,7 @@ try {
 index("symbol_files", { bundle_id: 1, app_version: 1 }, "bundle_version");
 index("push_messages", { app_id: 1, created_at: -1 }, "app_created");
 
-// TTL (raw data expiry). Analytics (event_data) is left without TTL, as in 1.x.
+// TTL (raw data expiry). Analytics retention drops whole daily tables (server side).
 for (const name of ["crash_reports", "perf_records", "push_messages"]) {
   const coll = target.getCollection(name);
   if (retentionDays <= 0) {

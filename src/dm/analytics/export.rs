@@ -4,20 +4,19 @@
 //!   GET  /admin/analytics/:app_id/tables/:table?limit=    newest rows of one table
 //!   GET  /admin/analytics/:app_id/tables/:table/export    NDJSON for `bq load --source_format=NEWLINE_DELIMITED_JSON`
 //!   GET  /admin/analytics/schema/:kind                    BigQuery schema JSON (events | pseudonymous_users | users)
-//!   POST /admin/analytics/:app_id/migrate-legacy?days=    old `event_data` batches → tables (idempotent)
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{StreamExt, TryStreamExt};
-use mongodb::bson::{doc, Bson, Document};
+use mongodb::bson::{doc, Bson};
 use serde::Deserialize;
 use serde_json::{json, Value as Json};
 
 use super::tables::{self, parse_table, Kind};
-use crate::dm::admin::{db_error, error, ok, since, to_json};
-use crate::dm::{AppState, RequestMeta};
+use crate::dm::admin::{db_error, error, ok, to_json};
+use crate::dm::AppState;
 
 type ApiResult = Result<Response, Response>;
 
@@ -230,68 +229,6 @@ pub async fn schema(Path(kind): Path<String>) -> ApiResult {
         _ => return Err(error(StatusCode::BAD_REQUEST, "kind must be events, pseudonymous_users or users")),
     };
     ok(schema)
-}
-
-// ── Migration of old batches ─────────────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct MigrateQuery {
-    days: Option<i64>,
-}
-
-/// Converts `event_data` batches (server versions before 3.2) received in the last `days` (default 7, max 365) into the
-/// tables. Rows keep `_id = <batch_id>:<index>` (batches without an id use their document id), so a
-/// second run stores nothing new.
-pub async fn migrate_legacy(State(state): State<AppState>, Path(app_id): Path<String>, Query(query): Query<MigrateQuery>) -> ApiResult {
-    let from = since(query.days);
-    let filter = doc! {
-        "received_at": { "$gte": from },
-        "$or": [ { "app_id": &app_id }, { "app_id": { "$exists": false } }, { "app_id": "" } ],
-    };
-    let mut cursor = state.db.event_data.find(filter).await.map_err(db_error)?;
-    let (mut batches, mut stored, mut failed) = (0_u64, 0_u64, 0_u64);
-    let meta = RequestMeta { app_id: Some(app_id.clone()), ..Default::default() };
-    while let Some(batch) = cursor.try_next().await.map_err(db_error)? {
-        batches += 1;
-        let received_ms = batch.get_datetime("received_at").map(|t| t.timestamp_millis()).unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
-        let id = match batch.get("_id") {
-            Some(Bson::ObjectId(oid)) => oid.to_hex(),
-            Some(other) => other.to_string(),
-            None => String::new(),
-        };
-        let mut body = to_json(strip(batch));
-        if let Some(object) = body.as_object_mut() {
-            if object.get("batch_id").and_then(Json::as_str).is_none_or(str::is_empty) {
-                object.insert("batch_id".into(), json!(format!("legacy-{id}")));
-            }
-            object.entry("app_id").or_insert(json!(app_id));
-        }
-        // Validate against the time the batch arrived, not today.
-        let Ok(checked) = crate::events::check_batch(&body, received_ms) else {
-            failed += 1;
-            continue;
-        };
-        let (context, request) = super::legacy::convert(&checked.body, &meta);
-        let Ok(converted) = super::check_request(request, received_ms * 1000) else {
-            failed += 1;
-            continue;
-        };
-        match super::store_unclaimed(&state, &meta, &context, &converted, received_ms * 1000).await {
-            Ok(count) => stored += count as u64,
-            Err(err) => {
-                eprintln!("[Analytics] migrate-legacy: {err}");
-                failed += 1;
-            }
-        }
-    }
-    ok(json!({ "app_id": app_id, "since": from.try_to_rfc3339_string().unwrap_or_default(), "batches": batches, "events_stored": stored, "batches_failed": failed }))
-}
-
-fn strip(mut batch: Document) -> Document {
-    for key in ["_id", "received_at", "status_code", "accepted", "duplicate", "rejected_events", "warnings"] {
-        batch.remove(key);
-    }
-    batch
 }
 
 #[cfg(test)]

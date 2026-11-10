@@ -140,7 +140,7 @@ async fn run() -> Result<(), BoxError> {
         return Err("invalid configuration (see the messages above)".into());
     }
 
-    let db = Db::connect(config.retention_days, config.analytics_retention_days).await?;
+    let db = Db::connect(config.retention_days).await?;
     log_config(&config);
     let state = AppState::new(db.clone(), config)?;
     if state.config.platform.token_secret_is_random {

@@ -69,7 +69,6 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/analytics/:app_id/tables", get(super::analytics::export::tables))
         .route("/analytics/:app_id/tables/:table", get(super::analytics::export::rows))
         .route("/analytics/:app_id/tables/:table/export", get(super::analytics::export::export))
-        .route("/analytics/:app_id/migrate-legacy", post(super::analytics::export::migrate_legacy))
         .route("/analytics/schema/:kind", get(super::analytics::export::schema))
         .route("/crashlytics/:app_id/trend", get(analytics::crashlytics_trend))
         .route("/crashlytics/issues/:issue_id/trend", get(analytics::issue_trend))
