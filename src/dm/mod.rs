@@ -10,6 +10,7 @@ pub mod alerts;
 pub mod apns;
 pub mod conditions;
 pub mod crashlytics;
+pub mod events_report;
 pub mod fcm;
 pub mod mapping;
 pub mod messaging;

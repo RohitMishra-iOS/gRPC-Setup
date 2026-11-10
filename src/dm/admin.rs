@@ -63,6 +63,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/analytics/:app_id/realtime", get(analytics::realtime))
         .route("/analytics/:app_id/events", get(analytics::events))
         .route("/analytics/:app_id/events/:name", get(analytics::event_detail))
+        .route("/analytics/:app_id/events-report", get(super::events_report::events_report))
         .route("/analytics/:app_id/screens", get(analytics::screens))
         .route("/analytics/:app_id/stream", get(analytics::stream))
         .route("/analytics/:app_id/users/:installation_id", get(analytics::user_detail))

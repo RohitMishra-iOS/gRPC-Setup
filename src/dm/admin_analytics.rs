@@ -8,6 +8,7 @@
 //!   GET /admin/analytics/:app_id/realtime                    users + events in the last 30 minutes
 //!   GET /admin/analytics/:app_id/events?days=                every event name with counts and users
 //!   GET /admin/analytics/:app_id/events/:name?days=&tz=      one event: per day, parameter values, recent occurrences
+//!   GET /admin/analytics/:app_id/events-report?start=&end=&tz=&granularity=&series=&platform=   GA4 Events report (dm/events_report.rs)
 //!   GET /admin/analytics/:app_id/screens?days=               screen_view by firebase_screen
 //!   GET /admin/analytics/:app_id/stream?limit=&installation_id=&event=   newest events (DebugView)
 //!   GET /admin/analytics/:app_id/users/:installation_id      one user's profile, device and event timeline

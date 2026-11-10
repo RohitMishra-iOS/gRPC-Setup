@@ -143,6 +143,7 @@ curl -H "x-admin-key: $K" $SERVER/admin/analytics/dmart-ready/tables            
 curl -H "x-admin-key: $K" $SERVER/admin/analytics/dmart-ready/tables/events_20261109?limit=20
 curl -H "x-admin-key: $K" $SERVER/admin/analytics/schema/events > events_schema.json   # BigQuery schema
 curl -H "x-admin-key: $K" -o day.ndjson $SERVER/admin/analytics/dmart-ready/tables/events_20261109/export
+curl -H "x-admin-key: $K" "$SERVER/admin/analytics/dmart-ready/events-report?start=2026-10-13&end=2026-11-09&granularity=day"  # GA4 Events report: per-event metrics + chart series (dm-specs EVR)
 bq load --source_format=NEWLINE_DELIMITED_JSON analytics_dmart.events_20261109 day.ndjson events_schema.json
 curl -X POST -H "x-admin-key: $K" "$SERVER/admin/analytics/dmart-ready/migrate-legacy?days=90"  # old event_data → tables
 ```
