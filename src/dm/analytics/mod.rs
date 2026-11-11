@@ -10,6 +10,7 @@ pub mod countries;
 pub mod export;
 pub mod legacy;
 pub mod reference;
+pub mod rename;
 pub mod row;
 pub mod tables;
 
@@ -22,7 +23,7 @@ use super::{authorize, require_context, AppState, RequestMeta};
 use crate::pb_dm::analytics_value::Value;
 use crate::pb_dm::{AnalyticsParam, AnalyticsValue, ClientContext, RejectedEvent, UploadEventsRequest, UploadEventsResponse};
 use crate::validate::{is_analytics_name, is_safe_id, limits};
-use reference::{is_reserved, AUTOMATIC_PARAMS};
+use reference::{is_reserved, renamed_param, AUTOMATIC_PARAMS};
 use row::Profile;
 use tables::Kind;
 
@@ -178,7 +179,7 @@ pub fn check_request(mut request: UploadEventsRequest, now_micros: i64) -> Resul
         } else if !is_analytics_name(&event.name, limits::EVENT_NAME) {
             problems.push(format!("name must start with a letter and use only letters, digits and _ (≤ {} characters)", limits::EVENT_NAME));
         } else if is_reserved(&event.name) {
-            problems.push("name uses a reserved prefix (firebase_, google_, ga_, dm_, apple_)".to_string());
+            problems.push("name uses a reserved prefix (firebase_, google_, ga_, dm_, DM_, apple_)".to_string());
         }
         let ts = event.timestamp_micros;
         if ts < now_micros - limits::EVENT_MAX_AGE_MS * 1000 || ts > now_micros + limits::EVENT_MAX_FUTURE_MS * 1000 {
@@ -212,7 +213,13 @@ fn clean_params(params: Vec<AnalyticsParam>, field: &str, event_level: bool, max
     let mut out: Vec<AnalyticsParam> = Vec::with_capacity(params.len());
     let mut seen = HashSet::new();
     let mut custom = 0;
-    for p in params {
+    for mut p in params {
+        // SDK versions before the DM_ rename still send firebase_screen etc. (ANA-015).
+        if event_level {
+            if let Some(current) = renamed_param(&p.key) {
+                p.key = current.to_string();
+            }
+        }
         let name = format!("{field}.{}", p.key);
         let automatic = event_level && AUTOMATIC_PARAMS.contains(&p.key.as_str());
         let problem = if !is_analytics_name(&p.key, limits::PARAM_NAME) {
@@ -468,13 +475,31 @@ mod tests {
         AnalyticsEvent { name: name.into(), timestamp_micros: now_micros(), params, ..Default::default() }
     }
 
+    // spec: ANA-015
+    #[test]
+    fn firebase_named_params_from_older_sdks_are_renamed() {
+        let now = now_micros();
+        let mut request = UploadEventsRequest { batch_id: "b-2".into(), ..Default::default() };
+        request.events = vec![event("screen_view", vec![
+            param("firebase_screen", Value::StringValue("Home".into())),
+            param("firebase_screen_id", Value::IntValue(7)),
+            param("firebase_event_origin", Value::StringValue("auto".into())),
+            param("firebase_custom", Value::IntValue(1)),
+        ])];
+        let checked = check_request(request, now).expect("batch is valid");
+        let keys: Vec<&str> = checked.request.events[0].params.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, vec!["DM_screen", "DM_screen_id", "DM_event_origin"]); // firebase_custom: still reserved
+        assert_eq!(reference::renamed_param("firebase_previous_class"), Some("DM_previous_class"));
+        assert_eq!(reference::renamed_param("DM_screen"), None);
+    }
+
     // spec: ANA-010, ANA-001, ANA-002
     #[test]
     fn validation_levels() {
         let now = now_micros();
         let mut request = UploadEventsRequest { batch_id: "b-1".into(), ..Default::default() };
         request.events = vec![
-            event("add_to_cart", vec![param("qty", Value::IntValue(2)), param("ga_custom", Value::IntValue(1)), param("firebase_screen", Value::StringValue("Home".into()))]),
+            event("add_to_cart", vec![param("qty", Value::IntValue(2)), param("ga_custom", Value::IntValue(1)), param("DM_screen", Value::StringValue("Home".into())), param("DM_fake", Value::IntValue(1))]),
             event("bad name!", vec![]),
             event("firebase_thing", vec![]),
             AnalyticsEvent { name: "old".into(), timestamp_micros: now - 40 * 86_400_000_000, ..Default::default() },
@@ -490,7 +515,7 @@ mod tests {
         assert_eq!(checked.indices, vec![0]);
         assert_eq!(checked.rejected.iter().map(|r| r.index).collect::<Vec<_>>(), vec![1, 2, 3]);
         let keys: Vec<&str> = checked.request.events[0].params.iter().map(|p| p.key.as_str()).collect();
-        assert_eq!(keys, vec!["qty", "firebase_screen"]); // ga_custom dropped, automatic kept
+        assert_eq!(keys, vec!["qty", "DM_screen"]); // ga_custom and DM_fake dropped, automatic kept
         let props: Vec<&str> = checked.request.user_properties.iter().map(|p| p.key.as_str()).collect();
         assert_eq!(props, vec!["city", "dm_exp_home_banner"]);
         assert!(checked.warnings.iter().any(|w| w.contains("ga_custom")));

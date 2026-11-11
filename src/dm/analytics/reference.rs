@@ -1,7 +1,26 @@
 //! Fixed lookup tables and rules of the GA4 export (dm-specs TBL-006, TBL-007, TBL-008).
 
 /// Reserved prefixes for event, parameter and user property names (ANA-001).
-pub const RESERVED_PREFIXES: &[&str] = &["firebase_", "google_", "ga_", "dm_", "apple_"];
+/// `DM_` holds the SDKs' own parameters (DM_screen, DM_event_origin …, dm-specs ANA-015).
+pub const RESERVED_PREFIXES: &[&str] = &["firebase_", "google_", "ga_", "dm_", "DM_", "apple_"];
+
+/// The SDKs' parameters that GA4 / Firebase name `firebase_*` are named `DM_*` here (ANA-015).
+/// Uploads from SDK versions that still send the `firebase_*` names are renamed on arrival, and
+/// rows stored before the rename are migrated once at start-up (rename.rs).
+pub const RENAMED_PARAMS: &[(&str, &str)] = &[
+    ("firebase_screen", "DM_screen"),
+    ("firebase_screen_class", "DM_screen_class"),
+    ("firebase_screen_id", "DM_screen_id"),
+    ("firebase_previous_screen", "DM_previous_screen"),
+    ("firebase_previous_class", "DM_previous_class"),
+    ("firebase_previous_id", "DM_previous_id"),
+    ("firebase_event_origin", "DM_event_origin"),
+];
+
+/// The current name of a parameter (`firebase_screen` → `DM_screen`), or None if unchanged.
+pub fn renamed_param(key: &str) -> Option<&'static str> {
+    RENAMED_PARAMS.iter().find(|(old, _)| *old == key).map(|(_, new)| *new)
+}
 
 /// Parameters the SDKs add themselves (ANA-011, TBL-010): exempt from the reserved-prefix rule and
 /// from the 25-parameter limit.
@@ -10,18 +29,18 @@ pub const AUTOMATIC_PARAMS: &[&str] = &[
     "ga_session_number",
     "engagement_time_msec",
     "session_engaged",
-    "firebase_screen",
-    "firebase_screen_class",
-    "firebase_screen_id",
-    "firebase_previous_screen",
-    "firebase_previous_class",
-    "firebase_previous_id",
-    "firebase_event_origin",
+    "DM_screen",
+    "DM_screen_class",
+    "DM_screen_id",
+    "DM_previous_screen",
+    "DM_previous_class",
+    "DM_previous_id",
+    "DM_event_origin",
     "entrances",
     "debug_mode",
 ];
 
-/// Events the SDKs log on their own (firebase_event_origin = auto for old uploads, TBL-004).
+/// Events the SDKs log on their own (DM_event_origin = auto for old uploads, TBL-004).
 pub const AUTOMATIC_EVENTS: &[&str] = &[
     "first_open", "first_visit", "session_start", "screen_view", "page_view", "user_engagement", "app_update",
     "os_update", "app_exception", "app_remove", "notification_receive", "notification_open", "notification_foreground",

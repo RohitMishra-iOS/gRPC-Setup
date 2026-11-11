@@ -154,7 +154,7 @@ pub fn events_schema() -> Json {
             d
         }),
         record("geo", strings(&["continent", "sub_continent", "country", "region", "city", "metro"])),
-        record("app_info", strings(&["id", "version", "install_store", "firebase_app_id", "install_source"])),
+        record("app_info", strings(&["id", "version", "install_store", "DM_app_id", "install_source"])),
         record("traffic_source", strings(&["name", "medium", "source"])),
         field("stream_id", "STRING"),
         field("platform", "STRING"),

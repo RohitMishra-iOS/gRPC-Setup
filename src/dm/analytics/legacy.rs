@@ -21,10 +21,10 @@ use crate::pb_dm::{
 
 /// Old parameter names → GA4 names (TBL-004).
 const RENAMES: &[(&str, &str)] = &[
-    ("screen_name", "firebase_screen"),
-    ("screen_class", "firebase_screen_class"),
-    ("previous_screen_name", "firebase_previous_screen"),
-    ("previous_screen_class", "firebase_previous_class"),
+    ("screen_name", "DM_screen"),
+    ("screen_class", "DM_screen_class"),
+    ("previous_screen_name", "DM_previous_screen"),
+    ("previous_screen_class", "DM_previous_class"),
     ("session_number", "ga_session_number"),
 ];
 
@@ -230,12 +230,12 @@ fn convert_event(event: &Map<String, Json>, batch_screen: &str) -> AnalyticsEven
     if let Some(id) = session {
         params.push(param("ga_session_id", Value::IntValue(id)));
     }
-    if !batch_screen.is_empty() && !params.iter().any(|p| p.key == "firebase_screen") {
-        params.push(param("firebase_screen", Value::StringValue(batch_screen.to_string())));
+    if !batch_screen.is_empty() && !params.iter().any(|p| p.key == "DM_screen") {
+        params.push(param("DM_screen", Value::StringValue(batch_screen.to_string())));
     }
-    if !params.iter().any(|p| p.key == "firebase_event_origin") {
+    if !params.iter().any(|p| p.key == "DM_event_origin") {
         let origin = if AUTOMATIC_EVENTS.contains(&name.as_str()) { "auto" } else { "app" };
-        params.push(param("firebase_event_origin", Value::StringValue(origin.into())));
+        params.push(param("DM_event_origin", Value::StringValue(origin.into())));
     }
     AnalyticsEvent { name, timestamp_micros: timestamp_ms.saturating_mul(1000), previous_timestamp_micros: 0, params, items }
 }
@@ -274,18 +274,18 @@ mod tests {
         assert_eq!(request.device.as_ref().unwrap().time_zone_offset_seconds, 19_800);
         let sv = &request.events[0];
         assert_eq!(sv.timestamp_micros, 1_700_000_000_000_000);
-        assert_eq!(get(sv, "firebase_screen"), Some(&Value::StringValue("Cart".into())));
-        assert_eq!(get(sv, "firebase_previous_screen"), Some(&Value::StringValue("Home".into())));
+        assert_eq!(get(sv, "DM_screen"), Some(&Value::StringValue("Cart".into())));
+        assert_eq!(get(sv, "DM_previous_screen"), Some(&Value::StringValue("Home".into())));
         assert!(get(sv, "screen_name").is_none());
         assert!(matches!(get(sv, "ga_session_id"), Some(Value::IntValue(n)) if *n >= 1_000_000_000));
-        assert_eq!(get(sv, "firebase_event_origin"), Some(&Value::StringValue("auto".into())));
+        assert_eq!(get(sv, "DM_event_origin"), Some(&Value::StringValue("auto".into())));
         let cart = &request.events[1];
         assert_eq!(get(cart, "price"), Some(&Value::DoubleValue(10.5)));
         assert_eq!(get(cart, "qty"), Some(&Value::IntValue(2)));
         assert_eq!(get(cart, "fast"), Some(&Value::IntValue(1)));
         assert_eq!(get(cart, "ga_session_id"), Some(&Value::IntValue(1_700_000_000)));
-        assert_eq!(get(cart, "firebase_screen"), Some(&Value::StringValue("Home".into())));
-        assert_eq!(get(cart, "firebase_event_origin"), Some(&Value::StringValue("app".into())));
+        assert_eq!(get(cart, "DM_screen"), Some(&Value::StringValue("Home".into())));
+        assert_eq!(get(cart, "DM_event_origin"), Some(&Value::StringValue("app".into())));
         assert_eq!(cart.items.len(), 1);
         assert_eq!(session_number(&json!("abc")), session_number(&json!("abc")));
     }

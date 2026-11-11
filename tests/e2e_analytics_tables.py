@@ -67,10 +67,10 @@ body = {
     "appInfo": {"id": "com.dmart.ready", "version": "2.1.0", "installStore": "App Store"},
     "privacyInfo": {"analyticsStorage": "Yes", "adsStorage": "No", "usesTransientToken": "No"},
     "events": [
-        {"name": "session_start", "timestampMicros": str(t0), "params": [p("ga_session_id", intValue="1762670000"), p("ga_session_number", intValue="1"), p("firebase_event_origin", stringValue="auto")]},
+        {"name": "session_start", "timestampMicros": str(t0), "params": [p("ga_session_id", intValue="1762670000"), p("ga_session_number", intValue="1"), p("DM_event_origin", stringValue="auto")]},
         {"name": "campaign_details", "timestampMicros": str(t0 + 1), "params": [p("source", stringValue="google"), p("medium", stringValue="cpc"), p("campaign", stringValue="diwali")]},
         {"name": "add_to_cart", "timestampMicros": str(t0 + 2), "previousTimestampMicros": str(t0 - 50),
-         "params": [p("price", doubleValue=10.5), p("qty", intValue="2"), p("name", stringValue="x"), p("flag", intValue="1"), p("firebase_screen", stringValue="HomePage"), p("ga_custom", intValue="1")],
+         "params": [p("price", doubleValue=10.5), p("qty", intValue="2"), p("name", stringValue="x"), p("flag", intValue="1"), p("DM_screen", stringValue="HomePage"), p("ga_custom", intValue="1")],
          "items": [{"params": [p("item_id", stringValue="A"), p("price", intValue="100"), p("quantity", intValue="1")]}]},
         {"name": "purchase", "timestampMicros": str(t0 + 3),
          "params": [p("value", intValue="300"), p("currency", stringValue="INR"), p("tax", intValue="10"), p("transaction_id", stringValue=f"T-{RUN}")],
@@ -104,12 +104,12 @@ check("[TBL-002] every row has every GA4 column, in export order", all([k for k 
       [k for k in all_rows[0] if k != "_id"] if all_rows else "no rows")
 check("[TBL-002] records have all sub-fields", all(set(row["device"]) >= {"category", "mobile_marketing_name", "time_zone_offset_seconds", "web_info"}
       and set(row["geo"]) == {"continent", "sub_continent", "country", "region", "city", "metro"}
-      and set(row["app_info"]) == {"id", "version", "install_store", "firebase_app_id", "install_source"} for row in all_rows))
+      and set(row["app_info"]) == {"id", "version", "install_store", "DM_app_id", "install_source"} for row in all_rows))
 cart = by.get("add_to_cart", {})
 check("[TBL-003] typed values: exactly one field set",
       param(cart, "price") == {"string_value": None, "int_value": None, "float_value": None, "double_value": 10.5}
       and param(cart, "qty")["int_value"] == 2 and param(cart, "name")["string_value"] == "x" and param(cart, "flag")["int_value"] == 1, cart.get("event_params"))
-check("[ANA-001] reserved-prefix custom parameter dropped, automatic kept", param(cart, "ga_custom") is None and param(cart, "firebase_screen")["string_value"] == "HomePage")
+check("[ANA-001] reserved-prefix custom parameter dropped, automatic kept", param(cart, "ga_custom") is None and param(cart, "DM_screen")["string_value"] == "HomePage")
 check("[TBL-002] event_date / platform / stream_id", cart.get("event_date") == table[-8:] and cart.get("platform") == "IOS" and cart.get("stream_id") == f"{APP}:ios", cart.get("event_date"))
 check("[TBL-005] user fields: id, pseudo id, first touch, property with set time, privacy",
       cart.get("user_id") == f"user-{RUN}" and cart.get("user_pseudo_id") == pseudo and cart.get("user_first_touch_timestamp") == t0 - 3_600_000_000
@@ -117,7 +117,7 @@ check("[TBL-005] user fields: id, pseudo id, first touch, property with set time
 check("[TBL-006] device record and Apple marketing name", cart["device"]["mobile_marketing_name"] == "iPhone 15 Pro Max"
       and cart["device"]["operating_system_version"] == "iOS 18.1" and cart["device"]["time_zone_offset_seconds"] == 19800, cart.get("device"))
 check("[TBL-006] geo from trusted CDN headers", cart["geo"]["country"] == "India" and cart["geo"]["continent"] == "Asia" and cart["geo"]["region"] == "Gujarat", cart.get("geo"))
-check("[TBL-006] app_info", cart["app_info"]["firebase_app_id"] == APP and cart["app_info"]["install_store"] == "App Store", cart.get("app_info"))
+check("[TBL-006] app_info", cart["app_info"]["DM_app_id"] == APP and cart["app_info"]["install_store"] == "App Store", cart.get("app_info"))
 camp = by.get("campaign_details", {})
 check("[TBL-007] collected_traffic_source from campaign params", (camp.get("collected_traffic_source") or {}).get("manual_source") == "google", camp.get("collected_traffic_source"))
 check("[TBL-007] first-touch traffic_source and last-click channel group",
@@ -219,9 +219,9 @@ r = requests.post(B + "/events", json=old, headers=H, timeout=30)
 olds = list(DB[table].find({"user_pseudo_id": f"old-{RUN}"}).sort("batch_event_index", 1))
 sv = olds[0] if olds else {}
 check("[TBL-013] old /events format still answers accepted and lands in the tables", r.ok and r.json().get("accepted") is True and len(olds) == 2, r.text[:200])
-check("[TBL-004] old parameter names become GA4 names", param(sv, "firebase_screen") == {"string_value": "Cart", "int_value": None, "float_value": None, "double_value": None}
-      and param(sv, "screen_name") is None and param(sv, "firebase_previous_screen")["string_value"] == "Home" and param(sv, "ga_session_id")["int_value"] is not None
-      and param(sv, "firebase_event_origin")["string_value"] == "auto", sv.get("event_params"))
+check("[TBL-004] old parameter names become GA4 names", param(sv, "DM_screen") == {"string_value": "Cart", "int_value": None, "float_value": None, "double_value": None}
+      and param(sv, "screen_name") is None and param(sv, "DM_previous_screen")["string_value"] == "Home" and param(sv, "ga_session_id")["int_value"] is not None
+      and param(sv, "DM_event_origin")["string_value"] == "auto", sv.get("event_params"))
 check("[TBL-003] old JSON numbers: whole → int_value, other → double_value", olds and param(olds[1], "qty")["int_value"] == 2 and param(olds[1], "price")["double_value"] == 10.5 and olds[1]["items"][0]["item_id"] == "A")
 
 # Migration of old event_data batches (TBL-013)
@@ -257,7 +257,7 @@ check("[TBL-014] DebugView stream by installation (via the pseudo id)", any(e["n
 ed = requests.get(f"{B}/admin/analytics/{APP}/events/add_to_cart?days=1", headers=ADMIN, timeout=30).json()
 check("[TBL-014] event detail with parameter breakdown", ed["totals"]["count"] >= 2 and any(pr["key"] == "qty" for pr in ed["params"]), ed.get("params"))
 sc = requests.get(f"{B}/admin/analytics/{APP}/screens?days=1", headers=ADMIN, timeout=30).json()
-check("[TBL-014] screens grouped by firebase_screen", any(s["screen_name"] == "Cart" for s in sc.get("screens", [])), sc)
+check("[TBL-014] screens grouped by DM_screen", any(s["screen_name"] == "Cart" for s in sc.get("screens", [])), sc)
 ud = requests.get(f"{B}/admin/analytics/{APP}/users/{inst}", headers=ADMIN, timeout=30).json()
 check("[TBL-014] user detail: profile and timeline", ud.get("latest_batch", {}).get("user_id") == f"user-{RUN}" and len(ud.get("timeline", [])) >= 7, {k: ud.get(k) for k in ("latest_batch",)})
 

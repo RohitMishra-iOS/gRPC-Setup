@@ -21,7 +21,7 @@ use crate::dm::{analytics, AppState, RequestMeta};
 use crate::validate::{is_analytics_name, is_safe_id, limits};
 
 /// Parameters the SDKs add on their own; they don't count against the 25-parameter limit.
-const AUTOMATIC_PARAMS: &[&str] = &["firebase_screen", "firebase_screen_class", "firebase_event_origin", "screen_name", "screen_class", "session_number", "ga_session_id", "engagement_time_msec", "previous_screen_name", "previous_screen_class"];
+const AUTOMATIC_PARAMS: &[&str] = &["DM_screen", "DM_screen_class", "DM_event_origin", "firebase_screen", "firebase_screen_class", "firebase_event_origin", "screen_name", "screen_class", "session_number", "ga_session_id", "engagement_time_msec", "previous_screen_name", "previous_screen_class"];
 
 /// Result of validating a batch: what will be stored, plus what was dropped and why.
 pub struct CheckedBatch {

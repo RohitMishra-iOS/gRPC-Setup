@@ -9,7 +9,7 @@
 //!   GET /admin/analytics/:app_id/events?days=                every event name with counts and users
 //!   GET /admin/analytics/:app_id/events/:name?days=&tz=      one event: per day, parameter values, recent occurrences
 //!   GET /admin/analytics/:app_id/events-report?start=&end=&tz=&granularity=&series=&platform=   GA4 Events report (dm/events_report.rs)
-//!   GET /admin/analytics/:app_id/screens?days=               screen_view by firebase_screen
+//!   GET /admin/analytics/:app_id/screens?days=               screen_view by DM_screen
 //!   GET /admin/analytics/:app_id/stream?limit=&installation_id=&event=   newest events (DebugView)
 //!   GET /admin/analytics/:app_id/users/:installation_id      one user's profile, device and event timeline
 //!   (tables / export / schema / migrate-legacy: dm/analytics/export.rs)
@@ -235,7 +235,7 @@ fn stream_projection() -> Document {
         "session_id": param("ga_session_id"),
         "installation_id": "$uid",
         "user_id": 1,
-        "screen_name": param("firebase_screen"),
+        "screen_name": param("DM_screen"),
         "app_version": "$app_info.version",
         "device_model": model(),
         "os_version": "$device.operating_system_version",
@@ -301,7 +301,7 @@ pub async fn event_detail(State(state): State<AppState>, Path((app_id, name)): P
 pub async fn screens(State(state): State<AppState>, Path(app_id): Path<String>, Query(query): Query<RangeQuery>) -> ApiResult {
     let from = since(query.days);
     let stages = vec![
-        doc! { "$group": { "_id": { "name": param("firebase_screen"), "class": param("firebase_screen_class") }, "views": { "$sum": 1 }, "users": { "$addToSet": "$uid" } } },
+        doc! { "$group": { "_id": { "name": param("DM_screen"), "class": param("DM_screen_class") }, "views": { "$sum": 1 }, "users": { "$addToSet": "$uid" } } },
         doc! { "$project": { "_id": 0, "screen_name": "$_id.name", "screen_class": "$_id.class", "views": 1, "users": { "$size": "$users" } } },
         doc! { "$sort": { "views": -1 } },
         doc! { "$limit": 100 },

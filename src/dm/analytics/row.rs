@@ -408,7 +408,7 @@ pub fn app_info_record(request: &UploadEventsRequest, context: &ClientContext) -
         "id": s(if a.id.is_empty() { &context.bundle_id } else { &a.id }),
         "version": s(if a.version.is_empty() { &context.app_version } else { &a.version }),
         "install_store": s(&a.install_store),
-        "firebase_app_id": s(&context.app_id),
+        "DM_app_id": s(&context.app_id),
         "install_source": s(&a.install_source),
     })
 }
@@ -683,7 +683,7 @@ pub fn build(
                 profile.first_purchase_date = Some(date.clone());
             }
         }
-        if let Some(screen) = p.text("firebase_screen") {
+        if let Some(screen) = p.text("DM_screen") {
             profile.last_screen = Some(screen);
         }
         profile.last_active_micros = profile.last_active_micros.max(ts);
@@ -890,7 +890,7 @@ mod tests {
         assert_eq!(get(first, "device.mobile_marketing_name").as_str(), Some("iPhone 15 Pro Max"));
         assert_eq!(get(first, "device.operating_system_version").as_str(), Some("iOS 18.1"));
         assert_eq!(get(first, "device.category").as_str(), Some("mobile"));
-        assert_eq!(get(first, "app_info.firebase_app_id").as_str(), Some("dmart-ready"));
+        assert_eq!(get(first, "app_info.DM_app_id").as_str(), Some("dmart-ready"));
         assert_eq!(*get(first, "geo.country"), Bson::Null);
         assert_eq!(first.get_bool("is_active_user").unwrap(), false);
         assert_eq!(built.rows[2].1.get_bool("is_active_user").unwrap(), true);
