@@ -97,8 +97,12 @@ pub struct Parameter {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConditionalValue {
     pub condition: String,
-    #[serde(deserialize_with = "value_text")]
+    #[serde(default, deserialize_with = "value_text")]
     pub value: String,
+    /// Firebase's "Use in-app default" on a conditional value: devices that match the condition
+    /// get no value for the parameter, so the app's own default applies (dm-specs RC-016).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_in_app_default: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -224,7 +228,10 @@ impl Template {
                 }
             }
             if let Some(kind) = &parameter.value_type {
-                let values = parameter.default_value.iter().chain(parameter.conditional_values.iter().map(|cv| &cv.value));
+                let values = parameter
+                    .default_value
+                    .iter()
+                    .chain(parameter.conditional_values.iter().filter(|cv| !cv.use_in_app_default).map(|cv| &cv.value));
                 for value in values {
                     check_type(key, kind, value)?;
                 }
@@ -312,7 +319,9 @@ impl Template {
                 .filter(|cv| matched.get(cv.condition.as_str()).copied().unwrap_or(false))
                 .min_by_key(|cv| priority.get(cv.condition.as_str()).copied().unwrap_or(usize::MAX));
             if let Some(cv) = conditional {
-                entries.insert(key.clone(), cv.value.clone());
+                if !cv.use_in_app_default {
+                    entries.insert(key.clone(), cv.value.clone());
+                }
             } else if let Some(default) = &parameter.default_value {
                 entries.insert(key.clone(), default.clone());
             }
@@ -805,6 +814,33 @@ mod tests {
 
     fn ctx_for(installation: &str) -> EvalContext {
         EvalContext { installation_id: installation.into(), ..Default::default() }
+    }
+
+    // spec: RC-016
+    #[test]
+    fn a_conditional_value_can_use_the_in_app_default() {
+        let template: Template = serde_json::from_value(serde_json::json!({
+            "conditions": [
+                {"name": "uat", "expression": {"country": {"eq": "IN"}}},
+                {"name": "all", "expression": {"always": true}}
+            ],
+            "parameters": {"api_host": {"default_value": "prod.dmart.in", "value_type": "NUMBER",
+                "conditional_values": [{"condition": "uat", "use_in_app_default": true}, {"condition": "all", "value": 7}]}}
+        }))
+        .unwrap();
+        // The in-app-default entry has no value, so its (empty) value is not type-checked …
+        let mut typed = template.clone();
+        typed.parameters.get_mut("api_host").unwrap().default_value = Some("1".into());
+        typed.validate().unwrap();
+        // … matching it sends nothing for the key (the app keeps its own default) and wins over
+        // later conditions; other devices still get the next matching value.
+        let india = EvalContext { installation_id: "i1".into(), country: "IN".into(), ..Default::default() };
+        assert!(!typed.evaluate(&india).0.contains_key("api_host"));
+        assert_eq!(typed.evaluate(&ctx_for("i2")).0["api_host"], "7");
+        // It round-trips, and is left out of the JSON when false.
+        let json = serde_json::to_value(&typed).unwrap();
+        assert_eq!(json["parameters"]["api_host"]["conditional_values"][0]["use_in_app_default"], true);
+        assert!(json["parameters"]["api_host"]["conditional_values"][1].get("use_in_app_default").is_none());
     }
 
     // spec: RC-006
