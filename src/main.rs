@@ -149,6 +149,7 @@ async fn run() -> Result<(), BoxError> {
     platform::database::start_change_stream(state.clone());
     dm::analytics::tables::spawn_retention(db.clone(), state.config.analytics_retention_days, state.config.analytics.timezone);
     dm::analytics::rename::spawn_once(db.clone());
+    dm::uninstall::spawn(state.clone());
 
     // ── 1. gRPC Server ───────────────────────────────────────────────────────
     let grpc_listener = bind(&grpc_host, grpc_port, "GRPC_PORT").await?;

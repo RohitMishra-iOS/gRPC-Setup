@@ -11,6 +11,9 @@ pub struct ApnsConfig {
     pub team_id: String,
     /// apns-topic fallback (normally the device's own bundle id is used).
     pub default_topic: Option<String>,
+    /// APNS_BASE_URL: send to this address instead of Apple's (a proxy or a test double). An
+    /// `http://` address is spoken as HTTP/1.1. None = api(.sandbox).push.apple.com.
+    pub base_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +292,7 @@ impl Config {
             key_id: env_nonempty("APNS_KEY_ID")?,
             team_id: env_nonempty("APNS_TEAM_ID")?,
             default_topic: env_nonempty("APNS_TOPIC"),
+            base_url: env_nonempty("APNS_BASE_URL").map(|u| u.trim_end_matches('/').to_string()),
         })
     }
 

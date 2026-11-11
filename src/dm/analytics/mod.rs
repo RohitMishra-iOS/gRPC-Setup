@@ -173,6 +173,11 @@ pub fn check_request(mut request: UploadEventsRequest, now_micros: i64) -> Resul
     let mut indices = Vec::with_capacity(events.len());
     let mut rejected = Vec::new();
     for (index, mut event) in events.into_iter().enumerate() {
+        // The silent uninstall check is not a message the user received (MSG-021): SDKs that
+        // predate it report it as notification_receive; drop those quietly.
+        if super::uninstall::is_probe_report(&event) {
+            continue;
+        }
         let mut problems = Vec::new();
         if event.name.trim().is_empty() {
             problems.push("name must not be blank".to_string());

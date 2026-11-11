@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value as Json};
 
 pub struct FcmClient {
+    /// DM_FCM_BASE_URL / DM_FCM_TOKEN_URL: Google's addresses by default; a proxy or a test double.
+    base_url: String,
+    token_url: String,
     project_id: String,
     client_email: String,
     key: jsonwebtoken::EncodingKey,
@@ -25,6 +28,12 @@ pub struct FcmError {
 impl FcmError {
     pub fn is_invalid_token(&self) -> bool {
         self.status == 404 || self.reason.contains("UNREGISTERED") || (self.status == 400 && self.reason.contains("registration token"))
+    }
+
+    /// The app was removed from the device (or the token expired after long inactivity): 404 /
+    /// UNREGISTERED. A malformed token (400) is not an uninstall (dm-specs MSG-020).
+    pub fn is_uninstalled(&self) -> bool {
+        self.status == 404 || self.reason.contains("UNREGISTERED")
     }
 }
 
@@ -49,6 +58,8 @@ impl FcmClient {
         let sa: Json = serde_json::from_str(service_account).map_err(|e| format!("FCM service account JSON: {e}"))?;
         let key = jsonwebtoken::EncodingKey::from_rsa_pem(sa["private_key"].as_str().unwrap_or_default().as_bytes()).map_err(|e| format!("FCM service account key: {e}"))?;
         Ok(Self {
+            base_url: crate::env_nonempty("DM_FCM_BASE_URL").unwrap_or_else(|| "https://fcm.googleapis.com".into()).trim_end_matches('/').to_string(),
+            token_url: crate::env_nonempty("DM_FCM_TOKEN_URL").unwrap_or_else(|| "https://oauth2.googleapis.com/token".into()),
             project_id: sa["project_id"].as_str().ok_or("service account has no project_id")?.to_string(),
             client_email: sa["client_email"].as_str().ok_or("service account has no client_email")?.to_string(),
             key,
@@ -72,7 +83,7 @@ impl FcmClient {
         .map_err(|e| FcmError { status: 0, reason: format!("OAuth JWT: {e}") })?;
         let response: Json = self
             .http
-            .post("https://oauth2.googleapis.com/token")
+            .post(&self.token_url)
             .form(&[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", assertion.as_str())])
             .send()
             .await
@@ -110,7 +121,7 @@ impl FcmClient {
     pub async fn send(&self, message: &FcmMessage<'_>) -> Result<(), FcmError> {
         let response = self
             .http
-            .post(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", self.project_id))
+            .post(format!("{}/v1/projects/{}/messages:send", self.base_url, self.project_id))
             .bearer_auth(self.access_token().await?)
             .json(&Self::build(message))
             .send()

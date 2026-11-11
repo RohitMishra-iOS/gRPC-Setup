@@ -379,3 +379,153 @@ mod tests {
         assert_eq!(midnight_micros(d, chrono_tz::Asia::Kolkata), Utc.with_ymd_and_hms(2026, 11, 8, 18, 30, 0).unwrap().timestamp_micros());
     }
 }
+
+// ── Installs vs uninstalls (dm-specs MSG-022) ────────────────────────────────
+
+/// A readable name for `app_info.install_source`: what the SDKs send (iOS: the build's channel;
+/// Android: the installer package) mapped to the store / tool people know.
+pub fn install_source_label(raw: &str) -> &'static str {
+    match raw {
+        "com.apple.AppStore" | "App Store" => "App Store",
+        "com.apple.TestFlight" | "TestFlight" => "TestFlight",
+        "xcode" => "Xcode (development build)",
+        "ad_hoc" => "Ad Hoc",
+        "enterprise" => "Enterprise",
+        "simulator" => "iOS Simulator",
+        "com.android.vending" | "com.google.android.feedback" => "Google Play",
+        "android_studio" | "adb" | "com.android.shell" => "Android Studio / adb",
+        "com.google.android.packageinstaller" | "com.android.packageinstaller" | "com.samsung.android.packageinstaller" => "APK sideload",
+        "dev.firebase.appdistribution" => "Firebase App Distribution",
+        "com.sec.android.app.samsungapps" => "Samsung Galaxy Store",
+        "com.amazon.venezia" => "Amazon Appstore",
+        "com.huawei.appmarket" => "Huawei AppGallery",
+        "com.xiaomi.mipicks" | "com.xiaomi.market" => "Xiaomi GetApps",
+        "com.oppo.market" | "com.heytap.market" => "OPPO App Market",
+        "com.vivo.appstore" => "vivo App Store",
+        "" => "Unknown",
+        _ => "Other",
+    }
+}
+
+pub async fn installs_report(State(state): State<AppState>, Path(app_id): Path<String>, Query(query): Query<ReportQuery>) -> ApiResult {
+    let cfg = &state.config.analytics;
+    let plan = plan(&query, cfg.timezone)?;
+    let from_us = midnight_micros(plan.start, plan.tz);
+    let to_us = midnight_micros(plan.end + Duration::days(1), plan.tz);
+    let names = tables_for(&app_id, &plan);
+    let mut first = doc! { "event_timestamp": { "$gte": from_us, "$lt": to_us }, "event_name": { "$in": ["first_open", "app_remove"] } };
+    if let Some(platform) = &plan.platform {
+        first.insert("platform", platform);
+    }
+    let tz_name = plan.tz.name();
+    let date = doc! { "$toDate": { "$toLong": { "$divide": ["$event_timestamp", 1000] } } };
+    let mut trunc = doc! { "date": date, "unit": plan.granularity.unit(), "timezone": tz_name };
+    if plan.granularity == Granularity::Week {
+        trunc.insert("startOfWeek", "sunday");
+    }
+    let pipeline = vec![doc! { "$facet": {
+        "time": [{ "$group": {
+            "_id": { "b": { "$dateToString": { "format": "%Y-%m-%d", "date": { "$dateTrunc": trunc }, "timezone": tz_name } }, "e": "$event_name" },
+            "c": { "$sum": 1 },
+        }}],
+        "platforms": [{ "$group": { "_id": { "p": "$platform", "e": "$event_name" }, "c": { "$sum": 1 } } }],
+        "sources": [{ "$group": { "_id": { "s": { "$ifNull": ["$app_info.install_source", ""] }, "p": "$platform", "e": "$event_name" }, "c": { "$sum": 1 } } }],
+        "detected": [{ "$match": { "event_name": "app_remove" } }, { "$unwind": "$event_params" }, { "$match": { "event_params.key": "detected_by" } },
+                     { "$group": { "_id": "$event_params.value.string_value", "c": { "$sum": 1 } } }],
+    }}];
+    let facet = tables::aggregate_union(&state.db, &names, first, pipeline).await.map_err(db_error)?.pop().unwrap_or_default();
+    let groups = |key: &str| -> Vec<Document> { facet.get_array(key).map(|a| a.iter().filter_map(|b| b.as_document().cloned()).collect()).unwrap_or_default() };
+    let is_install = |id: &Document| id.get_str("e") == Ok("first_open");
+
+    let mut by_bucket: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    let mut day = plan.granularity.bucket_start(plan.start);
+    while day <= plan.end {
+        by_bucket.insert(day.format("%Y-%m-%d").to_string(), (0, 0));
+        day = plan.granularity.next(day);
+    }
+    let (mut installs, mut uninstalls) = (0i64, 0i64);
+    for g in groups("time") {
+        let Ok(id) = g.get_document("_id") else { continue };
+        let c = int(&g, "c");
+        if is_install(id) { installs += c } else { uninstalls += c }
+        if let Some(entry) = id.get_str("b").ok().and_then(|b| by_bucket.get_mut(b)) {
+            if is_install(id) { entry.0 += c } else { entry.1 += c }
+        }
+    }
+    let buckets: Vec<Json> = by_bucket.into_iter().map(|(date, (i, u))| json!({ "date": date, "installs": i, "uninstalls": u })).collect();
+
+    let mut platforms: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    for g in groups("platforms") {
+        let Ok(id) = g.get_document("_id") else { continue };
+        let entry = platforms.entry(id.get_str("p").unwrap_or("").to_string()).or_default();
+        if is_install(id) { entry.0 += int(&g, "c") } else { entry.1 += int(&g, "c") }
+    }
+    let mut sources: BTreeMap<(String, String), (i64, i64)> = BTreeMap::new();
+    for g in groups("sources") {
+        let Ok(id) = g.get_document("_id") else { continue };
+        let entry = sources.entry((id.get_str("s").unwrap_or("").to_string(), id.get_str("p").unwrap_or("").to_string())).or_default();
+        if is_install(id) { entry.0 += int(&g, "c") } else { entry.1 += int(&g, "c") }
+    }
+    let mut source_rows: Vec<Json> = sources
+        .into_iter()
+        .map(|((raw, platform), (i, u))| json!({ "source": raw, "label": install_source_label(&raw), "platform": platform, "installs": i, "uninstalls": u }))
+        .collect();
+    source_rows.sort_by(|a, b| b["installs"].as_i64().cmp(&a["installs"].as_i64()).then(b["uninstalls"].as_i64().cmp(&a["uninstalls"].as_i64())));
+    let detected: serde_json::Map<String, Json> = groups("detected").iter().map(|g| (g.get_str("_id").unwrap_or("unknown").to_string(), json!(int(g, "c")))).collect();
+
+    // How much of the install base uninstall detection can see: devices with a working push token.
+    let mut push_devices = serde_json::Map::new();
+    let mut cursor = state
+        .db
+        .devices
+        .aggregate(vec![
+            doc! { "$match": { "app_id": &app_id, "active": true } },
+            doc! { "$group": { "_id": { "$ifNull": ["$transport", "apns"] }, "c": { "$sum": 1 }, "checked": { "$sum": { "$cond": [{ "$ifNull": ["$probed_at", false] }, 1, 0] } } } },
+        ])
+        .await
+        .map_err(db_error)?;
+    while let Some(row) = futures_util::TryStreamExt::try_next(&mut cursor).await.map_err(db_error)? {
+        push_devices.insert(row.get_str("_id").unwrap_or("apns").to_string(), json!({ "devices": int(&row, "c"), "checked": int(&row, "checked") }));
+    }
+    let status = state.db.database.collection::<Document>("dm_uninstall_probe").find_one(doc! { "_id": "status" }).await.map_err(db_error)?.unwrap_or_default();
+
+    ok(json!({
+        "app_id": app_id,
+        "start": plan.start.format("%Y-%m-%d").to_string(),
+        "end": plan.end.format("%Y-%m-%d").to_string(),
+        "tz": tz_name,
+        "granularity": plan.granularity.name(),
+        "platform": plan.platform,
+        "totals": { "installs": installs, "uninstalls": uninstalls, "net": installs - uninstalls },
+        "series": { "buckets": buckets },
+        "platforms": platforms.into_iter().map(|(p, (i, u))| json!({ "platform": p, "installs": i, "uninstalls": u })).collect::<Vec<_>>(),
+        "sources": source_rows,
+        "detection": {
+            "check_enabled": super::uninstall::probe_hours() > 0,
+            "interval_hours": super::uninstall::probe_hours(),
+            "apns_configured": state.apns.is_some(),
+            "fcm_configured": state.fcm.is_some(),
+            "push_devices": push_devices,
+            "detected_by": detected,
+            "last_check_at": status.get_datetime("last_run_at").ok().map(|d| d.timestamp_millis()),
+        },
+    }))
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::install_source_label;
+
+    // spec: MSG-022, ANA-016
+    #[test]
+    fn install_sources_have_readable_names() {
+        assert_eq!(install_source_label("com.apple.AppStore"), "App Store");
+        assert_eq!(install_source_label("com.apple.TestFlight"), "TestFlight");
+        assert_eq!(install_source_label("xcode"), "Xcode (development build)");
+        assert_eq!(install_source_label("com.android.vending"), "Google Play");
+        assert_eq!(install_source_label("android_studio"), "Android Studio / adb");
+        assert_eq!(install_source_label("com.google.android.packageinstaller"), "APK sideload");
+        assert_eq!(install_source_label(""), "Unknown");
+        assert_eq!(install_source_label("com.example.store"), "Other");
+    }
+}

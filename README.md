@@ -190,6 +190,9 @@ db.getCollection("analytics_dmart-ready.events_20261109").aggregate([
 | `DM_DSYM_CACHE_DIR` | `$TMPDIR/dm-dsym-cache` | Extracted DWARF cache |
 | `APNS_KEY_P8` or `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID` | — | APNs token auth (push sending) |
 | `APNS_TOPIC` | — | apns-topic fallback (normally the device's bundle id) |
+| `DM_UNINSTALL_PROBE_HOURS` | `24` | Uninstall detection: silent "still installed?" push to each iOS / Android device this often (0 = off; uninstalls are still seen on regular sends). See below |
+| `DM_UNINSTALL_PROBE_TICK_SECONDS` | `3600` | How often the check looks for devices that are due |
+| `APNS_BASE_URL`, `DM_FCM_BASE_URL`, `DM_FCM_TOKEN_URL` | Apple's / Google's | Send to a proxy or a test double instead (an `http://` APNs address is spoken as HTTP/1.1) |
 
 ---
 
@@ -508,6 +511,7 @@ API shape: `{"error": {"code": 403, "status": "PERMISSION_DENIED", "reason": "�
 | Functions | `POST /v1/functions/:name` | Your HTTPS endpoint gets `{data, context: {auth, app, instance_id}}` + `X-DM-Signature`; JSON or streaming (SSE) responses |
 | Database | `/v1/db/documents/*`, `/v1/db/{commit, query, aggregate, beginTransaction, rollback}`, WebSocket `/v1/db/listen` | Documents & subcollections, typed values, field transforms, atomic batches, optimistic transactions, compound/OR queries, cursors, collection groups, count/sum/avg, live listeners, security rules |
 | Push (all platforms) | `POST /admin/messaging/send` | One send API fans out to APNs (iOS), FCM HTTP v1 (Android, `DM_FCM_SERVICE_ACCOUNT`) and Web Push with VAPID + aes128gcm (browsers, `DM_WEBPUSH_VAPID_PRIVATE_KEY`; public key at `GET /v1/messaging/webpush-key`) |
+| Installs & uninstalls | `GET /admin/analytics/:app/installs`, `GET/POST /admin/messaging/uninstall-check` | Installs = `first_open`. Uninstalls are detected when Apple (410 Unregistered) or Google (UNREGISTERED) rejects a removed app's push token — on any send and on a silent daily check — and logged as GA4 `app_remove` (once per install, dated when Apple says the token died). Needs APNs / FCM credentials; covers devices that registered for push; usually 1–3 days after the uninstall. Console: Analytics → Installs & uninstalls (dm-specs MSG-020…022) |
 | JSON RPC | `POST /v1/rpc/:service/:method` | Every dm.sdk.v1 RPC (Crashlytics, Remote Config, Performance, Messaging) as proto3 JSON |
 
 Full request/response formats are documented at the top of each file in `src/platform/`.

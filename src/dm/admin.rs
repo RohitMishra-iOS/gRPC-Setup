@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/analytics/:app_id/events", get(analytics::events))
         .route("/analytics/:app_id/events/:name", get(analytics::event_detail))
         .route("/analytics/:app_id/events-report", get(super::events_report::events_report))
+        .route("/analytics/:app_id/installs", get(super::events_report::installs_report))
         .route("/analytics/:app_id/screens", get(analytics::screens))
         .route("/analytics/:app_id/stream", get(analytics::stream))
         .route("/analytics/:app_id/users/:installation_id", get(analytics::user_detail))
@@ -72,6 +73,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/analytics/:app_id/tables/:table/export", get(super::analytics::export::export))
         .route("/analytics/:app_id/migrate-legacy", post(super::analytics::export::migrate_legacy))
         .route("/analytics/migrate-dm-keys", post(super::analytics::rename::migrate_now))
+        .route("/messaging/uninstall-check", get(super::uninstall::status).post(super::uninstall::run_now))
         .route("/analytics/schema/:kind", get(super::analytics::export::schema))
         .route("/crashlytics/:app_id/trend", get(analytics::crashlytics_trend))
         .route("/crashlytics/issues/:issue_id/trend", get(analytics::issue_trend))
@@ -497,13 +499,13 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
     let mut portable = request.data.clone();
     portable.insert("dm".into(), payload["dm"].clone());
     let portable_ref = &portable;
-    let results: Vec<(String, Result<(), (String, bool)>)> = cursor
+    let results: Vec<(String, Result<(), (String, bool, Option<i64>)>)> = cursor
         .filter_map(|device| async move { device.ok() })
         .map(|device| async move {
             let id = device.get_str("_id").unwrap_or_default().to_string();
             let result = match device.get_str("transport").unwrap_or("apns") {
                 "fcm" => match state.fcm.as_ref() {
-                    None => Err(("FcmNotConfigured".to_string(), false)),
+                    None => Err(("FcmNotConfigured".to_string(), false, None)),
                     Some(fcm) => fcm
                         .send(&super::fcm::FcmMessage {
                             token: device.get_str("fcm_token").unwrap_or_default(),
@@ -514,11 +516,11 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
                             high_priority: !silent,
                         })
                         .await
-                        .map_err(|e| (e.reason.split_whitespace().next().unwrap_or("FcmError").to_string(), e.is_invalid_token())),
+                        .map_err(|e| (e.reason.split_whitespace().next().unwrap_or("FcmError").to_string(), e.is_invalid_token(), e.is_uninstalled().then(super::analytics::now_micros))),
                 },
                 "webpush" => match (state.webpush.as_ref(), device.get_document("web_push").ok()) {
-                    (None, _) => Err(("WebPushNotConfigured".to_string(), false)),
-                    (_, None) => Err(("NoSubscription".to_string(), true)),
+                    (None, _) => Err(("WebPushNotConfigured".to_string(), false, None)),
+                    (_, None) => Err(("NoSubscription".to_string(), true, None)),
                     (Some(wp), Some(sub)) => {
                         let message = json!({ "notification": notification_ref, "data": portable_ref });
                         wp.send(
@@ -531,12 +533,12 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
                         .await
                         .map_err(|e| {
                             eprintln!("[Messaging] web push failed: {}", e.reason);
-                            (format!("WebPush{}", e.status), e.is_invalid_token())
+                            (format!("WebPush{}", e.status), e.is_invalid_token(), None)
                         })
                     }
                 },
                 _ => match state.apns.as_ref() {
-                    None => Err(("ApnsNotConfigured".to_string(), false)),
+                    None => Err(("ApnsNotConfigured".to_string(), false, None)),
                     Some(apns) => {
                         let topic = device.get_str("bundle_id").ok().filter(|t| !t.is_empty()).or(apns.default_topic()).unwrap_or_default();
                         apns.send(PushRequest {
@@ -549,7 +551,11 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
                             ttl_seconds,
                         })
                         .await
-                        .map_err(|e| (e.reason.clone(), e.is_invalid_token()))
+                        .map_err(|e| {
+                            let now = super::analytics::now_micros();
+                            let gone = e.is_uninstalled().then(|| e.timestamp_ms.map_or(now, |ms| ms * 1000).min(now));
+                            (e.reason.clone(), e.is_invalid_token(), gone)
+                        })
                     }
                 },
             };
@@ -562,15 +568,26 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
     let mut sent = 0;
     let mut failures: HashMap<String, u64> = HashMap::new();
     let mut invalid: Vec<String> = Vec::new();
+    let mut uninstalled: Vec<(String, i64)> = Vec::new();
     for (id, result) in &results {
         match result {
             Ok(()) => sent += 1,
-            Err((reason, invalid_token)) => {
+            Err((reason, invalid_token, gone)) => {
                 *failures.entry(reason.clone()).or_default() += 1;
-                if *invalid_token {
+                if let Some(at) = gone {
+                    uninstalled.push((id.clone(), *at));
+                } else if *invalid_token {
                     invalid.push(id.clone());
                 }
             }
+        }
+    }
+    // The app is gone from these devices: app_remove (MSG-020); deactivates them too.
+    let transport_of = |id: &str| if id.starts_with("fcm") { "fcm" } else { "apns" };
+    for (id, at) in &uninstalled {
+        let via = state.db.devices.find_one(doc! { "_id": id }).await.ok().flatten().and_then(|d| d.get_str("transport").ok().map(str::to_string)).unwrap_or_else(|| transport_of(id).to_string());
+        if let Err(err) = super::uninstall::record(&state, id, *at, &via).await {
+            eprintln!("[Uninstall] recording {id}: {err}");
         }
     }
     if !invalid.is_empty() {
@@ -602,7 +619,8 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
             "sent": sent as i64,
             "failed": failed as i64,
             "failure_reasons": bson::to_bson(&failures).unwrap_or(Bson::Null),
-            "deactivated_devices": invalid.len() as i64,
+            "deactivated_devices": (invalid.len() + uninstalled.len()) as i64,
+            "uninstalls": uninstalled.len() as i64,
             "created_at": DateTime::now(),
             "received_at": DateTime::now(),
         })
@@ -614,7 +632,8 @@ async fn deliver(state: &AppState, request: SendRequest, extra_dm: Option<Json>)
         "sent": sent,
         "failed": failed,
         "failure_reasons": failures,
-        "deactivated_devices": invalid.len(),
+        "deactivated_devices": invalid.len() + uninstalled.len(),
+        "uninstalls": uninstalled.len(),
     }))
 }
 

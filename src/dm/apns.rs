@@ -26,6 +26,8 @@ pub struct ApnsError {
     pub status: u16,
     /// Apple's `reason`, e.g. "BadDeviceToken", "Unregistered", "TopicDisallowed".
     pub reason: String,
+    /// With 410: when Apple learned the token stopped being valid (ms since epoch).
+    pub timestamp_ms: Option<i64>,
 }
 
 impl ApnsError {
@@ -33,6 +35,13 @@ impl ApnsError {
     pub fn is_invalid_token(&self) -> bool {
         self.status == 410
             || matches!(self.reason.as_str(), "BadDeviceToken" | "Unregistered" | "DeviceTokenNotForTopic")
+    }
+
+    /// The app was removed from the device (410 / Unregistered). BadDeviceToken and
+    /// DeviceTokenNotForTopic are configuration problems (sandbox token sent to production, wrong
+    /// bundle id), not uninstalls (dm-specs MSG-020).
+    pub fn is_uninstalled(&self) -> bool {
+        self.status == 410 || self.reason == "Unregistered"
     }
 }
 
@@ -60,12 +69,12 @@ impl ApnsClient {
     pub fn new(config: ApnsConfig) -> Result<Self, crate::BoxError> {
         let key = EncodingKey::from_ec_pem(config.key_pem.as_bytes())
             .map_err(|e| format!("APNS key is not a valid .p8 (PKCS#8 EC) key: {e}"))?;
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .http2_prior_knowledge()
-            .timeout(Duration::from_secs(15))
-            .pool_idle_timeout(Duration::from_secs(600))
-            .build()?;
+        let plain = config.base_url.as_deref().is_some_and(|u| u.starts_with("http://"));
+        let mut http = reqwest::Client::builder().use_rustls_tls().timeout(Duration::from_secs(15)).pool_idle_timeout(Duration::from_secs(600));
+        if !plain {
+            http = http.http2_prior_knowledge();
+        }
+        let http = http.build()?;
         Ok(Self { config, key, http, token: Mutex::new(None) })
     }
 
@@ -84,14 +93,18 @@ impl ApnsClient {
         header.kid = Some(self.config.key_id.clone());
         let iat = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let token = jsonwebtoken::encode(&header, &Claims { iss: &self.config.team_id, iat }, &self.key)
-            .map_err(|e| ApnsError { status: 0, reason: format!("JWT signing failed: {e}") })?;
+            .map_err(|e| ApnsError { status: 0, reason: format!("JWT signing failed: {e}"), timestamp_ms: None })?;
         *cached = Some((token.clone(), Instant::now()));
         Ok(token)
     }
 
     pub async fn send(&self, request: PushRequest<'_>) -> Result<(), ApnsError> {
-        let host = if request.environment == "sandbox" { "api.sandbox.push.apple.com" } else { "api.push.apple.com" };
-        let url = format!("https://{host}/3/device/{}", request.device_token);
+        let base = match &self.config.base_url {
+            Some(base) => base.clone(),
+            None if request.environment == "sandbox" => "https://api.sandbox.push.apple.com".to_string(),
+            None => "https://api.push.apple.com".to_string(),
+        };
+        let url = format!("{base}/3/device/{}", request.device_token);
         let expiration = if request.ttl_seconds == 0 {
             0
         } else {
@@ -111,16 +124,17 @@ impl ApnsClient {
             builder = builder.header("apns-collapse-id", collapse);
         }
 
-        let response = builder.send().await.map_err(|e| ApnsError { status: 0, reason: e.to_string() })?;
+        let response = builder.send().await.map_err(|e| ApnsError { status: 0, reason: e.to_string(), timestamp_ms: None })?;
         let status = response.status().as_u16();
         if status == 200 {
             return Ok(());
         }
         let body: Json = response.json().await.unwrap_or(Json::Null);
         let reason = body.get("reason").and_then(Json::as_str).unwrap_or("Unknown").to_string();
+        let timestamp_ms = body.get("timestamp").and_then(Json::as_i64);
         if status == 403 && reason == "ExpiredProviderToken" {
             *self.token.lock().expect("apns token") = None;
         }
-        Err(ApnsError { status, reason })
+        Err(ApnsError { status, reason, timestamp_ms })
     }
 }
