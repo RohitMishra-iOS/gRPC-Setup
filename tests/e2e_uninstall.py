@@ -116,11 +116,13 @@ try:
         assert r.ok, r.text
         return r.json()["registrationToken"]
 
-    def first_open(inst, platform, source, at_us=None, previous=None):
+    def first_open(inst, platform, source, at_us=None, previous=None, device_key=None):
         at_us = at_us or int(time.time() * 1e6) - 7_200_000_000  # installed two hours ago
         params = [{"key": "first_open_time", "value": {"intValue": str(at_us // 1000)}}]
         if previous:  # iOS SDK: the install before this one on the device, from the Keychain
             params.append({"key": "previous_installation_id", "value": {"stringValue": previous}})
+        if device_key:  # Android SDK: hash that survives a reinstall (ANDROID_ID)
+            params.append({"key": "device_install_key", "value": {"stringValue": device_key}})
         body = {"context": ctx(inst, platform), "batchId": f"fo-{inst}", "userPseudoId": inst,
                 "appInfo": {"id": "com.dmart.ready", "version": "5.13.0", "installSource": source},
                 "events": [{"name": "first_open", "timestampMicros": str(at_us), "params": params}]}
@@ -229,21 +231,35 @@ try:
           len(rows) == 1 and p(rows[0], "detected_by") == "reinstall" and rows[0]["event_timestamp"] == reinstalled_at - 1_000_000, rows)
     check("[ANA-017] an unknown previous install logs nothing", count(f"never-seen-{RUN}") == 0)
 
+    # ── Android delete and reinstall: the device install key names the removed install ──
+    I["dk_first"], I["dk_again"] = f"dk_first-{RUN}", f"dk_again-{RUN}"
+    key = uuid.uuid4().hex
+    first_open(I["dk_first"], "android", "com.sec.android.app.samsungapps", device_key=key)
+    time.sleep(1)
+    check("[ANA-017] the first install with a device key is not an uninstall", count(I["dk_first"]) == 0)
+    reinstalled_at = int(time.time() * 1e6)
+    first_open(I["dk_again"], "android", "com.sec.android.app.samsungapps", at_us=reinstalled_at, device_key=key)
+    time.sleep(1.5)
+    rows = [r for c in db.list_collection_names() if c.startswith(f"analytics_{APP}.events_") for r in db[c].find({"event_name": "app_remove", "user_pseudo_id": I["dk_first"]})]
+    check("[ANA-017] Android: the same device key from a new install logs app_remove for the earlier one",
+          len(rows) == 1 and p(rows[0], "detected_by") == "reinstall" and rows[0]["event_timestamp"] == reinstalled_at - 1_000_000 and rows[0]["platform"] == "ANDROID", rows)
+    check("[ANA-017] the key now belongs to the new install", db.dm_device_install_keys.find_one({"_id": f"{APP}:{key}"})["installation_id"] == I["dk_again"])
+
     # ── Installs vs uninstalls report ────────────────────────────────────────
     today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 19800))
     yesterday = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 19800 - 86400))
     rep = requests.get(f"{B}/admin/analytics/{APP}/installs", params={"start": yesterday, "end": today, "tz": "Asia/Kolkata"}, headers=ADMIN, timeout=60).json()
-    check("[MSG-022] totals: 12 installs, 5 uninstalls, net 7", rep.get("totals") == {"installs": 12, "uninstalls": 5, "net": 7}, rep.get("totals"))
-    check("[MSG-022] daily buckets add up", sum(b["installs"] for b in rep["series"]["buckets"]) == 12 and sum(b["uninstalls"] for b in rep["series"]["buckets"]) == 5, rep["series"])
+    check("[MSG-022] totals: 14 installs, 6 uninstalls, net 8", rep.get("totals") == {"installs": 14, "uninstalls": 6, "net": 8}, rep.get("totals"))
+    check("[MSG-022] daily buckets add up", sum(b["installs"] for b in rep["series"]["buckets"]) == 14 and sum(b["uninstalls"] for b in rep["series"]["buckets"]) == 6, rep["series"])
     plat = {x["platform"]: x for x in rep["platforms"]}
     check("[MSG-022] by platform", plat.get("IOS", {}).get("installs") == 10 and plat.get("IOS", {}).get("uninstalls") == 4
-          and plat.get("ANDROID", {}).get("installs") == 2 and plat.get("ANDROID", {}).get("uninstalls") == 1, rep["platforms"])
+          and plat.get("ANDROID", {}).get("installs") == 4 and plat.get("ANDROID", {}).get("uninstalls") == 2, rep["platforms"])
     src = {(x["label"], x["platform"]): x for x in rep["sources"]}
     check("[ANA-016] by install source with readable names", src.get(("App Store", "IOS"), {}).get("installs") == 4 and src.get(("TestFlight", "IOS"), {}).get("uninstalls") == 1
           and src.get(("Xcode (development build)", "IOS"), {}).get("installs") == 2 and src.get(("Google Play", "ANDROID"), {}).get("installs") == 1
           and src.get(("Android Studio / adb", "ANDROID"), {}).get("uninstalls") == 1, rep["sources"])
     d = rep.get("detection", {})
-    check("[MSG-022] detection status: methods, credentials, devices with push", d.get("detected_by") == {"apns": 2, "fcm": 1, "reinstall": 2} and d.get("apns_configured") and d.get("fcm_configured")
+    check("[MSG-022] detection status: methods, credentials, devices with push", d.get("detected_by") == {"apns": 2, "fcm": 1, "reinstall": 3} and d.get("apns_configured") and d.get("fcm_configured")
           and d["push_devices"]["apns"]["devices"] >= 1 and d.get("last_check_at"), d)
     ios_only = requests.get(f"{B}/admin/analytics/{APP}/installs", params={"start": yesterday, "end": today, "platform": "IOS"}, headers=ADMIN, timeout=60).json()
     check("[MSG-022] platform filter", ios_only["totals"] == {"installs": 10, "uninstalls": 4, "net": 6}, ios_only["totals"])

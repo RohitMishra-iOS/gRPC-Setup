@@ -111,6 +111,29 @@ pub async fn record_replaced(state: &AppState, app_id: &str, installation_id: &s
     log_remove(state, app_id, installation_id, device.as_ref(), at_micros, "reinstall").await
 }
 
+/// Collection: which install last sent each Android device install key, `_id = "<app>:<key>"`.
+const DEVICE_KEYS: &str = "dm_device_install_keys";
+
+/// Records that `installation_id` now holds the device install key (Android, ANA-017) and returns
+/// the install that held it before, if a different one did.
+pub async fn swap_device_key(state: &AppState, app_id: &str, key: &str, installation_id: &str) -> Result<Option<String>, crate::BoxError> {
+    if key.len() > 128 || installation_id.is_empty() {
+        return Ok(None);
+    }
+    let before = state
+        .db
+        .coll(DEVICE_KEYS)
+        .find_one_and_update(
+            doc! { "_id": format!("{app_id}:{key}") },
+            doc! { "$set": { "app_id": app_id, "installation_id": installation_id, "updated_at": DateTime::now() } },
+        )
+        .upsert(true)
+        .await?;
+    Ok(before
+        .and_then(|d| d.get_str("installation_id").ok().map(str::to_string))
+        .filter(|previous| previous != installation_id))
+}
+
 /// Logs one `app_remove` for an install (once ever, through the batch ledger), from its device row
 /// when there is one and otherwise from its analytics profile.
 async fn log_remove(state: &AppState, app_id: &str, installation_id: &str, device: Option<&Document>, at_micros: i64, via: &str) -> Result<bool, crate::BoxError> {

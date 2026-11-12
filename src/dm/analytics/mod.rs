@@ -59,33 +59,55 @@ pub async fn upload_events(state: &AppState, meta: &RequestMeta, mut request: Up
     Ok(response)
 }
 
-/// Installs a `first_open` says it replaced on the same device (`previous_installation_id`, from
-/// the iOS SDK's Keychain; dm-specs ANA-017), each with the time to log its `app_remove` at
-/// (1 s before the first open).
-pub fn replaced_installs(request: &UploadEventsRequest) -> Vec<(String, i64)> {
+/// What a `first_open` says about the install it replaced on the same device (dm-specs ANA-017).
+#[derive(Debug, Clone)]
+pub enum Replaced {
+    /// iOS: the previous installation id, kept in the Keychain.
+    Install(String),
+    /// Android: a hash that stays the same across a reinstall (from ANDROID_ID); the server
+    /// remembers which install last sent it.
+    DeviceKey(String),
+}
+
+/// The `first_open`s of an upload that identify a replaced install, each with the time to log its
+/// `app_remove` at (1 s before the first open).
+pub fn replaced_installs(request: &UploadEventsRequest) -> Vec<(Replaced, i64)> {
     use crate::pb_dm::analytics_value::Value;
-    request
-        .events
-        .iter()
-        .filter(|e| e.name == "first_open")
-        .filter_map(|e| {
-            let p = e.params.iter().find(|p| p.key == "previous_installation_id")?;
-            match p.value.as_ref()?.value.as_ref()? {
-                Value::StringValue(id) if !id.is_empty() => Some((id.clone(), e.timestamp_micros - 1_000_000)),
-                _ => None,
-            }
-        })
-        .collect()
+    let text = |e: &crate::pb_dm::AnalyticsEvent, key: &str| -> Option<String> {
+        let p = e.params.iter().find(|p| p.key == key)?;
+        match p.value.as_ref()?.value.as_ref()? {
+            Value::StringValue(v) if !v.is_empty() => Some(v.clone()),
+            _ => None,
+        }
+    };
+    let mut out = Vec::new();
+    for e in request.events.iter().filter(|e| e.name == "first_open") {
+        let at = e.timestamp_micros - 1_000_000;
+        if let Some(id) = text(e, "previous_installation_id") {
+            out.push((Replaced::Install(id), at));
+        } else if let Some(key) = text(e, "device_install_key") {
+            out.push((Replaced::DeviceKey(key), at));
+        }
+    }
+    out
 }
 
 /// Logs `app_remove` for the replaced installs, in the background.
-pub fn after_reinstall(state: &AppState, context: &ClientContext, replaced: Vec<(String, i64)>) {
-    for (previous, at) in replaced {
-        if previous == context.installation_id {
-            continue;
-        }
-        let (state, app_id) = (state.clone(), context.app_id.clone());
+pub fn after_reinstall(state: &AppState, context: &ClientContext, replaced: Vec<(Replaced, i64)>) {
+    for (replaced, at) in replaced {
+        let (state, app_id, current) = (state.clone(), context.app_id.clone(), context.installation_id.clone());
         tokio::spawn(async move {
+            let previous = match replaced {
+                Replaced::Install(id) => id,
+                Replaced::DeviceKey(key) => match crate::dm::uninstall::swap_device_key(&state, &app_id, &key, &current).await {
+                    Ok(Some(id)) => id,
+                    Ok(None) => return,
+                    Err(err) => return eprintln!("[Analytics] device install key: {err}"),
+                },
+            };
+            if previous.is_empty() || previous == current {
+                return;
+            }
             match crate::dm::uninstall::record_replaced(&state, &app_id, &previous, at).await {
                 Ok(true) => println!("[Analytics] reinstall: app_remove logged for {app_id}/{previous}"),
                 Ok(false) => {}
