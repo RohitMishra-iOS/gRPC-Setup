@@ -197,24 +197,40 @@ try:
               for r in db[c].find({"event_name": "notification_receive", "user_pseudo_id": I["ios_keep"]})]
     check("[MSG-021] the check is not stored as notification_receive (older SDKs)", labels == ["promo"], labels)
 
+    # ── Delete and reinstall on the same iPhone: iOS hands back the same APNs token ──
+    same_token = hexid("cafe")
+    I["ios_first"], I["ios_again"] = f"ios_first-{RUN}", f"ios_again-{RUN}"
+    first_open(I["ios_first"], "ios", "com.apple.AppStore")
+    tokens["ios_first"] = register(I["ios_first"], "ios", apnsToken=same_token, apnsEnvironment="sandbox")
+    register(I["ios_first"], "ios", apnsToken=same_token, apnsEnvironment="sandbox")  # relaunch: same install
+    check("[MSG-020] relaunching the same install is not an uninstall", count(I["ios_first"]) == 0)
+    first_open(I["ios_again"], "ios", "xcode", at_us=int(time.time() * 1e6))
+    before_reinstall = int(time.time() * 1e6)
+    tokens["ios_again"] = register(I["ios_again"], "ios", apnsToken=same_token, apnsEnvironment="sandbox")
+    rows = [r for c in db.list_collection_names() if c.startswith(f"analytics_{APP}.events_") for r in db[c].find({"event_name": "app_remove", "user_pseudo_id": I["ios_first"]})]
+    check("[MSG-020] a reinstall with the same token logs app_remove for the earlier install",
+          len(rows) == 1 and p(rows[0], "detected_by") == "reinstall" and rows[0]["event_timestamp"] <= before_reinstall + 1_000_000, rows)
+    old, new = db.devices.find_one({"_id": tokens["ios_first"]}), db.devices.find_one({"_id": tokens["ios_again"]})
+    check("[MSG-020] the earlier install's device is uninstalled, the new one active", old["active"] is False and old["invalid_reason"] == "uninstalled" and new["active"] is True, (old, new))
+
     # ── Installs vs uninstalls report ────────────────────────────────────────
     today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 19800))
     yesterday = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 19800 - 86400))
     rep = requests.get(f"{B}/admin/analytics/{APP}/installs", params={"start": yesterday, "end": today, "tz": "Asia/Kolkata"}, headers=ADMIN, timeout=60).json()
-    check("[MSG-022] totals: 7 installs, 3 uninstalls, net 4", rep.get("totals") == {"installs": 7, "uninstalls": 3, "net": 4}, rep.get("totals"))
-    check("[MSG-022] daily buckets add up", sum(b["installs"] for b in rep["series"]["buckets"]) == 7 and sum(b["uninstalls"] for b in rep["series"]["buckets"]) == 3, rep["series"])
+    check("[MSG-022] totals: 9 installs, 4 uninstalls, net 5", rep.get("totals") == {"installs": 9, "uninstalls": 4, "net": 5}, rep.get("totals"))
+    check("[MSG-022] daily buckets add up", sum(b["installs"] for b in rep["series"]["buckets"]) == 9 and sum(b["uninstalls"] for b in rep["series"]["buckets"]) == 4, rep["series"])
     plat = {x["platform"]: x for x in rep["platforms"]}
-    check("[MSG-022] by platform", plat.get("IOS", {}).get("installs") == 5 and plat.get("IOS", {}).get("uninstalls") == 2
+    check("[MSG-022] by platform", plat.get("IOS", {}).get("installs") == 7 and plat.get("IOS", {}).get("uninstalls") == 3
           and plat.get("ANDROID", {}).get("installs") == 2 and plat.get("ANDROID", {}).get("uninstalls") == 1, rep["platforms"])
     src = {(x["label"], x["platform"]): x for x in rep["sources"]}
-    check("[ANA-016] by install source with readable names", src.get(("App Store", "IOS"), {}).get("installs") == 3 and src.get(("TestFlight", "IOS"), {}).get("uninstalls") == 1
-          and src.get(("Xcode (development build)", "IOS"), {}).get("installs") == 1 and src.get(("Google Play", "ANDROID"), {}).get("installs") == 1
+    check("[ANA-016] by install source with readable names", src.get(("App Store", "IOS"), {}).get("installs") == 4 and src.get(("TestFlight", "IOS"), {}).get("uninstalls") == 1
+          and src.get(("Xcode (development build)", "IOS"), {}).get("installs") == 2 and src.get(("Google Play", "ANDROID"), {}).get("installs") == 1
           and src.get(("Android Studio / adb", "ANDROID"), {}).get("uninstalls") == 1, rep["sources"])
     d = rep.get("detection", {})
-    check("[MSG-022] detection status: methods, credentials, devices with push", d.get("detected_by") == {"apns": 2, "fcm": 1} and d.get("apns_configured") and d.get("fcm_configured")
+    check("[MSG-022] detection status: methods, credentials, devices with push", d.get("detected_by") == {"apns": 2, "fcm": 1, "reinstall": 1} and d.get("apns_configured") and d.get("fcm_configured")
           and d["push_devices"]["apns"]["devices"] >= 1 and d.get("last_check_at"), d)
     ios_only = requests.get(f"{B}/admin/analytics/{APP}/installs", params={"start": yesterday, "end": today, "platform": "IOS"}, headers=ADMIN, timeout=60).json()
-    check("[MSG-022] platform filter", ios_only["totals"] == {"installs": 5, "uninstalls": 2, "net": 3}, ios_only["totals"])
+    check("[MSG-022] platform filter", ios_only["totals"] == {"installs": 7, "uninstalls": 3, "net": 4}, ios_only["totals"])
     st = requests.get(f"{B}/admin/messaging/uninstall-check", headers=ADMIN, timeout=30).json()
     check("[MSG-021] status endpoint", st.get("enabled") and st.get("interval_hours") == 24 and st.get("total_uninstalls") == 2 and st.get("last_run_at"), st)
     check("[MSG-021] admin key required", requests.post(f"{B}/admin/messaging/uninstall-check", timeout=30).status_code == 401)

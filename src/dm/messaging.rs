@@ -4,6 +4,7 @@
 //! SDK receives (`_id`). Re-registering the same install returns the same token, as the proto
 //! contract promises. Sending is done by the admin API (admin.rs → apns.rs).
 
+use futures_util::StreamExt;
 use mongodb::bson::{doc, DateTime};
 use tonic::Status;
 
@@ -113,8 +114,19 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
         }
         match result {
             Ok(_) => {
-                // The same APNs token can't belong to two live installs (e.g. after a reinstall);
-                // deactivate stale rows so a push isn't delivered twice.
+                // The same push token can't belong to two live installs; deactivate stale rows so a
+                // push isn't delivered twice. A live row of *another* install with this token means
+                // the app was deleted and installed again on this device (iOS often hands the
+                // reinstall the same APNs token): that earlier install is an uninstall (MSG-020).
+                let reinstalled: Vec<String> = match state
+                    .db
+                    .devices
+                    .find(doc! { "app_id": &context.app_id, address_field: &address, "_id": { "$ne": &token }, "active": true, "installation_id": { "$ne": &context.installation_id } })
+                    .await
+                {
+                    Ok(cursor) => cursor.filter_map(|d| async move { d.ok().and_then(|d| d.get_str("_id").ok().map(str::to_string)) }).collect().await,
+                    Err(_) => vec![],
+                };
                 let _ = state
                     .db
                     .devices
@@ -123,6 +135,13 @@ pub async fn register_device(state: &AppState, meta: &RequestMeta, request: Regi
                         doc! { "$set": { "active": false, "invalid_reason": "superseded", "updated_at": now } },
                     )
                     .await;
+                for stale in reinstalled {
+                    // Deleted at the latest just before this install registered.
+                    let at = super::analytics::now_micros() - 1_000_000;
+                    if let Err(err) = super::uninstall::record(state, &stale, at, "reinstall").await {
+                        eprintln!("[Uninstall] recording reinstall of {stale}: {err}");
+                    }
+                }
                 return Ok(RegisterDeviceResponse { registration_token: token });
             }
             Err(err) if is_duplicate_key(&err) => continue,

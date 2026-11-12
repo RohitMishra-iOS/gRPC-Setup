@@ -8,7 +8,7 @@
 
 use axum::extract::State;
 use axum::response::Response;
-use mongodb::bson::{doc, Bson, DateTime, Document};
+use mongodb::bson::{doc, Bson, DateTime};
 use serde_json::json;
 
 use super::reference::RENAMED_PARAMS;
