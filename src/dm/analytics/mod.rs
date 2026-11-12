@@ -51,7 +51,48 @@ pub async fn upload_events(state: &AppState, meta: &RequestMeta, mut request: Up
     authorize(&state.config, meta, &context.app_id)?;
     let now = now_micros();
     let checked = check_request(request, now).map_err(|errors| Status::invalid_argument(errors.join("; ")))?;
-    ingest(state, meta, &context, checked, now).await
+    let replaced = replaced_installs(&checked.request);
+    let response = ingest(state, meta, &context, checked, now).await?;
+    if !response.duplicate {
+        after_reinstall(state, &context, replaced);
+    }
+    Ok(response)
+}
+
+/// Installs a `first_open` says it replaced on the same device (`previous_installation_id`, from
+/// the iOS SDK's Keychain; dm-specs ANA-017), each with the time to log its `app_remove` at
+/// (1 s before the first open).
+pub fn replaced_installs(request: &UploadEventsRequest) -> Vec<(String, i64)> {
+    use crate::pb_dm::analytics_value::Value;
+    request
+        .events
+        .iter()
+        .filter(|e| e.name == "first_open")
+        .filter_map(|e| {
+            let p = e.params.iter().find(|p| p.key == "previous_installation_id")?;
+            match p.value.as_ref()?.value.as_ref()? {
+                Value::StringValue(id) if !id.is_empty() => Some((id.clone(), e.timestamp_micros - 1_000_000)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Logs `app_remove` for the replaced installs, in the background.
+pub fn after_reinstall(state: &AppState, context: &ClientContext, replaced: Vec<(String, i64)>) {
+    for (previous, at) in replaced {
+        if previous == context.installation_id {
+            continue;
+        }
+        let (state, app_id) = (state.clone(), context.app_id.clone());
+        tokio::spawn(async move {
+            match crate::dm::uninstall::record_replaced(&state, &app_id, &previous, at).await {
+                Ok(true) => println!("[Analytics] reinstall: app_remove logged for {app_id}/{previous}"),
+                Ok(false) => {}
+                Err(err) => eprintln!("[Analytics] reinstall app_remove for {previous}: {err}"),
+            }
+        });
+    }
 }
 
 // ── Validation (ANA-001, ANA-002, ANA-010) ──────────────────────────────────────────────────────

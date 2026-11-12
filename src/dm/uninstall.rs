@@ -80,52 +80,91 @@ fn sparam(key: &str, value: &str) -> AnalyticsParam {
 /// ("apns" / "fcm"). Deactivates the device; returns true when `app_remove` was logged.
 pub async fn record(state: &AppState, token_id: &str, at_micros: i64, via: &str) -> Result<bool, crate::BoxError> {
     let Some(device) = state.db.devices.find_one(doc! { "_id": token_id }).await? else { return Ok(false) };
-    let now = DateTime::now();
     state
         .db
         .devices
         .update_one(
             doc! { "_id": token_id },
-            doc! { "$set": { "active": false, "invalid_reason": "uninstalled", "uninstalled_at": DateTime::from_millis(at_micros / 1000), "updated_at": now } },
+            doc! { "$set": { "active": false, "invalid_reason": "uninstalled", "uninstalled_at": DateTime::from_millis(at_micros / 1000), "updated_at": DateTime::now() } },
         )
         .await?;
-    let app_id = text(&device, "app_id");
-    let installation_id = text(&device, "installation_id");
+    log_remove(state, &text(&device, "app_id"), &text(&device, "installation_id"), Some(&device), at_micros, via).await
+}
+
+/// A new install named the install it replaced on the same device (iOS keeps the previous
+/// installation id in the Keychain, which survives deleting the app; dm-specs ANA-017). Logs that
+/// install's `app_remove` and deactivates its push devices. Only for an install the server has a
+/// profile for, in the same app. Returns whether an app_remove was logged.
+pub async fn record_replaced(state: &AppState, app_id: &str, installation_id: &str, at_micros: i64) -> Result<bool, crate::BoxError> {
+    if installation_id.is_empty() {
+        return Ok(false);
+    }
+    let device = state.db.devices.find_one(doc! { "app_id": app_id, "installation_id": installation_id }).sort(doc! { "updated_at": -1 }).await?;
+    state
+        .db
+        .devices
+        .update_many(
+            doc! { "app_id": app_id, "installation_id": installation_id, "active": true },
+            doc! { "$set": { "active": false, "invalid_reason": "uninstalled", "uninstalled_at": DateTime::from_millis(at_micros / 1000), "updated_at": DateTime::now() } },
+        )
+        .await?;
+    log_remove(state, app_id, installation_id, device.as_ref(), at_micros, "reinstall").await
+}
+
+/// Logs one `app_remove` for an install (once ever, through the batch ledger), from its device row
+/// when there is one and otherwise from its analytics profile.
+async fn log_remove(state: &AppState, app_id: &str, installation_id: &str, device: Option<&Document>, at_micros: i64, via: &str) -> Result<bool, crate::BoxError> {
     if app_id.is_empty() || installation_id.is_empty() {
         return Ok(false);
     }
-    let profile = state.db.analytics_users.find_one(doc! { "app_id": &app_id, "installation_id": &installation_id }).await?.unwrap_or_default();
+    let Some(profile) = state.db.analytics_users.find_one(doc! { "app_id": app_id, "installation_id": installation_id }).await? else {
+        // Never uploaded anything: nothing to attribute an uninstall to (also stops made-up ids).
+        if device.is_none() {
+            return Ok(false);
+        }
+        return log_remove_with(state, app_id, installation_id, device, &Document::new(), at_micros, via).await;
+    };
     // Used after the token died: the token rotated (restore, re-registration), not an uninstall.
     let last_active = profile.get_i64("last_active_micros").unwrap_or(0);
     if last_active > at_micros + 60_000_000 {
         return Ok(false);
     }
+    log_remove_with(state, app_id, installation_id, device, &profile, at_micros, via).await
+}
 
-    let profile_device = profile.get_document("device").cloned().unwrap_or_default();
-    let profile_app = profile.get_document("app_info").cloned().unwrap_or_default();
+async fn log_remove_with(state: &AppState, app_id: &str, installation_id: &str, device: Option<&Document>, profile: &Document, at_micros: i64, via: &str) -> Result<bool, crate::BoxError> {
+    let profile_context = profile.get_document("context").cloned().unwrap_or_default();
+    // Device row first, then the profile's last upload context.
+    let field = |key: &str| {
+        let from_device = device.map(|d| text(d, key)).unwrap_or_default();
+        if from_device.is_empty() { text(&profile_context, key) } else { from_device }
+    };
+    let user_id = device.map(|d| text(d, "user_id")).filter(|u| !u.is_empty()).unwrap_or_else(|| text(profile, "user_id"));
     let context = ClientContext {
-        app_id: app_id.clone(),
-        installation_id: installation_id.clone(),
-        user_id: text(&device, "user_id"),
-        platform: text(&device, "platform"),
-        sdk_version: text(&device, "sdk_version"),
-        bundle_id: text(&device, "bundle_id"),
-        app_version: text(&device, "app_version"),
-        app_build: text(&device, "app_build"),
-        os_version: text(&device, "os_version"),
-        device_model: text(&device, "device_model"),
-        locale: text(&device, "locale"),
-        timezone: text(&device, "timezone"),
+        app_id: app_id.to_string(),
+        installation_id: installation_id.to_string(),
+        user_id: user_id.clone(),
+        platform: field("platform"),
+        sdk_version: field("sdk_version"),
+        bundle_id: field("bundle_id"),
+        app_version: field("app_version"),
+        app_build: field("app_build"),
+        os_version: field("os_version"),
+        device_model: field("device_model"),
+        locale: field("locale"),
+        timezone: field("timezone"),
         ..Default::default()
     };
+    let profile_device = profile.get_document("device").cloned().unwrap_or_default();
+    let profile_app = profile.get_document("app_info").cloned().unwrap_or_default();
     let d = |k: &str| text(&profile_device, k);
     let request = UploadEventsRequest {
         context: Some(context.clone()),
         // One app_remove per install, ever: the batch id goes through the batch ledger.
         batch_id: format!("app_remove:{app_id}:{installation_id}"),
         upload_timestamp_micros: now_micros(),
-        user_id: text(&device, "user_id"),
-        user_pseudo_id: profile.get_str("user_pseudo_id").unwrap_or(&installation_id).to_string(),
+        user_id,
+        user_pseudo_id: profile.get_str("user_pseudo_id").unwrap_or(installation_id).to_string(),
         device: Some(AnalyticsDevice {
             category: d("category"),
             mobile_brand_name: d("mobile_brand_name"),

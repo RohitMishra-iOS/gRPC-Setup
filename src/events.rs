@@ -260,8 +260,12 @@ pub async fn process_batch(state: &AppState, meta: &RequestMeta, body: &Json) ->
     warnings.extend(converted.warnings.iter().cloned());
     let report = json!({ "rejected_events": rejected_events, "warnings": warnings });
     let converted = analytics::Checked { rejected: Vec::new(), warnings: Vec::new(), ..converted };
+    let replaced = analytics::replaced_installs(&converted.request);
     match analytics::ingest(state, meta, &context, converted, now_ms * 1000).await {
         Ok(response) => {
+            if !response.duplicate {
+                analytics::after_reinstall(state, &context, replaced);
+            }
             if response.duplicate {
                 println!("[Events] duplicate batch_id={} ignored", batch_id_label(body));
             }
